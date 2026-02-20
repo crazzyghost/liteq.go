@@ -1,0 +1,188 @@
+package liteq
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stephenafamo/bob/dialect/psql"
+	"github.com/stephenafamo/bob/dialect/psql/im"
+	"github.com/stephenafamo/bob/dialect/psql/sm"
+	"github.com/stephenafamo/bob/dialect/psql/um"
+)
+
+type PgQueue[T interface{}] struct {
+	BaseQueue
+	Pool *pgxpool.Pool
+}
+
+func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
+	entry, ok := interface{}(&item).(IQueueEntry)
+	if !ok {
+		return fmt.Errorf("item does not implement BaseQueueEntry")
+	}
+	
+	query := psql.Insert(
+		im.Into(q.QueueName, "data", "meta", "updated_at"),
+		im.Values(psql.Arg(entry.GetBaseQueueEntry().Data, entry.GetBaseQueueEntry().Meta, psql.Raw("NOW()"))),
+	)
+
+
+	sql, args, err := query.Build(q.Ctx)
+	log.Println(sql, args)
+	if err != nil {
+		return fmt.Errorf("could not build enqueue query: %w", err)
+	}
+
+	_, err = tx.Exec(q.Ctx, sql, args...)
+	if err != nil {
+		return fmt.Errorf("could not enqueue entry: %w", err)
+	}
+
+	return nil
+}
+
+func (q *PgQueue[T]) Dequeue(batchSize int) (tasks []T, err error) {
+	tx, err := q.Pool.Begin(q.Ctx)
+	if err != nil {
+		return nil, fmt.Errorf("unable to start transaction: %w", err)
+	}
+
+	defer tx.Rollback(q.Ctx)
+
+	rawQuery := `
+		WITH claimed_tasks AS(
+			SELECT *
+			FROM %s
+			WHERE (
+				((meta->>'status')::text = 'PENDING' AND (meta->>'isRetry')::boolean = FALSE AND deleted_at IS NULL) OR -- NEW TASKS
+				((meta->>'status')::text = 'PENDING' AND (meta->>'isRetry')::boolean = TRUE  AND (meta->>'nextRunAt')::timestamp <= NOW() AND deleted_at IS NULL) -- RETRY TASKS
+			)
+			ORDER BY created_at ASC
+			FOR UPDATE SKIP LOCKED LIMIT $1
+		)
+		UPDATE %s
+        SET meta = jsonb_set(%s.meta, '{status}','"RUNNING"', true), dequeued_at = NOW(), updated_at = NOW()
+		FROM claimed_tasks
+		WHERE %s.id = claimed_tasks.id
+		RETURNING %s.*
+	`
+	sql := fmt.Sprintf(rawQuery,
+		psql.Quote(q.QueueName).String(),
+		psql.Quote(q.QueueName).String(),
+		psql.Quote(q.QueueName).String(),
+		psql.Quote(q.QueueName).String(),
+		psql.Quote(q.QueueName).String(),
+	)
+
+	rows, err := tx.Query(q.Ctx, sql, batchSize)
+	if err != nil {
+		return nil, fmt.Errorf("unable to claim tasks: %w", err)
+	}
+	defer rows.Close()
+
+	tasks, err = pgx.CollectRows(rows, pgx.RowToStructByName[T])
+	if err != nil {
+		return nil, fmt.Errorf("unable to collect rows: %w", err)
+	}
+
+	tx.Commit(q.Ctx)
+	return tasks, nil
+}
+
+func (q *PgQueue[T]) UpdateQueueEntryMeta(item T, tx pgx.Tx, conditions ...Condition) error {
+	entry, ok := interface{}(&item).(IQueueEntry)
+	if !ok {
+		return fmt.Errorf("item does not implement GetBaseQueueEntry")
+	}
+
+	query := psql.Update(
+		um.Table(q.QueueName),
+		um.SetCol("meta").ToArg(entry.GetBaseQueueEntry().Meta),
+		um.SetCol("updated_at").To(psql.Raw("NOW()")),
+	)
+
+	IDEquals(entry.GetBaseQueueEntry().Id).ApplyToUpdate(query)
+
+	for _, cond := range conditions {
+		cond.ApplyToUpdate(query)
+	}
+
+	sql, args, err := query.Build(q.Ctx)
+	if err != nil {
+		return fmt.Errorf("could not build update query: %w", err)
+	}
+
+	_, err = tx.Exec(q.Ctx, sql, args...)
+	if err != nil {
+		return fmt.Errorf("could not update entry status: %w", err)
+	}
+	return nil
+}
+
+func (q *PgQueue[T]) CheckCondition(ctx context.Context, tx pgx.Tx, conditions ...Condition) (bool, error) {
+	query := psql.Select(
+		sm.From(q.QueueName),
+		sm.Columns("1"),
+		sm.Limit(1),
+	)
+
+	for _, cond := range conditions {
+		cond.ApplyToSelect(query)
+	}
+
+	sql, args, err := query.Build(ctx)
+	if err != nil {
+		return false, fmt.Errorf("could not build check query: %w", err)
+	}
+
+	log.Println(sql, args)
+
+	var exists int
+	err = tx.QueryRow(ctx, sql, args...).Scan(&exists)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return false, nil
+		}
+		return false, fmt.Errorf("could not check condition: %w", err)
+	}
+
+	return true, nil
+}
+
+func (q *PgQueue[T]) UpdateStatus(ctx context.Context, tx pgx.Tx, status string, conditions ...Condition) error {
+	query := psql.Update(
+		um.Table(q.QueueName),
+		um.SetCol("meta").To(psql.Raw(fmt.Sprintf(`jsonb_set(meta, '{status}', '"%s"', true)`, status))),
+		um.SetCol("updated_at").To(psql.Raw("NOW()")),
+	)
+
+	for _, cond := range conditions {
+		cond.ApplyToUpdate(query)
+	}
+
+	sql, args, err := query.Build(ctx)
+	if err != nil {
+		return fmt.Errorf("could not build update status query: %w", err)
+	}
+
+	_, err = tx.Exec(ctx, sql, args...)
+	if err != nil {
+		return fmt.Errorf("could not update entry status: %w", err)
+	}
+
+	return nil
+}
+
+func NewPgQueue[T interface{}](ctx context.Context, pool *pgxpool.Pool, queueName string, retryPolicy *RetryPolicy) *PgQueue[T] {
+	return &PgQueue[T]{
+		BaseQueue: BaseQueue{
+			Ctx:         ctx,
+			QueueName:   queueName,
+			RetryPolicy: retryPolicy,
+		},
+		Pool: pool,
+	}
+}
