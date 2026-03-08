@@ -29,7 +29,7 @@ type BaseQueueEntryData interface{}
 type BaseQueueEntryMetaData struct {
 	Status         string         `json:"status"`
 	IsRetry        bool           `json:"isRetry"`
-	RetryPolicy    RetryPolicy    `json:"retryPolicy"`
+	RetryPolicy    *RetryPolicy   `json:"retryPolicy"`
 	Retries        int            `json:"retries"`
 	ScheduleConfig ScheduleConfig `json:"scheduleConfig"`
 	NextRunAt      *time.Time     `json:"nextRunAt"`

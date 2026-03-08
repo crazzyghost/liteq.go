@@ -13,28 +13,30 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+type TaskRetryPolicySelector func(task Task) (*RetryPolicy, error)
+
 type WorkerConfig struct {
-	TaskBatchSize         int
-	TaskQueue             *PgQueue[Task]
-	DeadLetterQueue       *PgQueue[Task]
-	ForceQueueRetryPolicy bool
+	TaskBatchSize      int
+	TaskQueue          *PgQueue[Task]
+	DeadLetterQueue    *PgQueue[Task]
+	GetTaskRetryPolicy TaskRetryPolicySelector
 }
 
 type Worker struct {
-	Ctx                   context.Context
-	TaskBatchSize         int
-	TaskQueue             *PgQueue[Task]
-	DeadLetterQueue       *PgQueue[Task]
-	ForceQueueRetryPolicy bool
+	Ctx                context.Context
+	TaskBatchSize      int
+	TaskQueue          *PgQueue[Task]
+	DeadLetterQueue    *PgQueue[Task]
+	GetTaskRetryPolicy TaskRetryPolicySelector
 }
 
 func NewWorker(ctx context.Context, config WorkerConfig) *Worker {
 	return &Worker{
-		Ctx:                   ctx,
-		TaskBatchSize:         config.TaskBatchSize,
-		TaskQueue:             config.TaskQueue,
-		DeadLetterQueue:       config.DeadLetterQueue,
-		ForceQueueRetryPolicy: config.ForceQueueRetryPolicy,
+		Ctx:                ctx,
+		TaskBatchSize:      config.TaskBatchSize,
+		TaskQueue:          config.TaskQueue,
+		DeadLetterQueue:    config.DeadLetterQueue,
+		GetTaskRetryPolicy: config.GetTaskRetryPolicy,
 	}
 }
 
@@ -57,18 +59,8 @@ func (w *Worker) HandleProcessed(task Task, status TaskStatus, tx pgx.Tx) (err e
 	return nil
 }
 
-func (w *Worker) GetRetryPolicy(task Task) (retryPolicy RetryPolicy) {
-	if w.ForceQueueRetryPolicy {
-		retryPolicy = *w.TaskQueue.RetryPolicy
-	} else {
-		retryPolicy = task.Meta.RetryPolicy
-	}
-	return retryPolicy
-}
-
-func (w *Worker) GetRetrySchedule(task *Task) (nextRunAt time.Time) {
+func (w *Worker) GetRetrySchedule(task *Task, retryPolicy *RetryPolicy) (nextRunAt time.Time) {
 	retries := task.Meta.Retries
-	retryPolicy := w.GetRetryPolicy(*task)
 
 	backoff := retryPolicy.RetryDelayMs * int(math.Pow(2, float64(retries)))
 	maxBackoff := min(backoff, retryPolicy.MaxDelayMs)
@@ -81,14 +73,17 @@ func (w *Worker) GetRetrySchedule(task *Task) (nextRunAt time.Time) {
 
 func (w *Worker) Retry(task Task, tx pgx.Tx) (err error) {
 	meta := task.Meta
-	retryPolicy := w.GetRetryPolicy(task)
+	retryPolicy, err := w.GetTaskRetryPolicy(task)
+	if err != nil {
+		return fmt.Errorf("could not resolve retry policy: %w", err)
+	}
 
-	if task.WillExceedMaxRetries(retryPolicy.MaxRetries) {
+	if task.WillExceedMaxRetries(retryPolicy.MaxRetries) || retryPolicy == nil {
 		slog.Error("task has exceeded max retries")
 		return &MaxRetriesExceededError{Retries: meta.Retries, MaxRetries: retryPolicy.MaxRetries}
 	}
 
-	nextRunAt := w.GetRetrySchedule(&task)
+	nextRunAt := w.GetRetrySchedule(&task, retryPolicy)
 
 	task.Meta.IsRetry = true
 	task.Meta.Retries += 1

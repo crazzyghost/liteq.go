@@ -2,8 +2,12 @@ package liteq
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"log/slog"
+	"sync"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -15,7 +19,9 @@ import (
 
 type PgQueue[T interface{}] struct {
 	BaseQueue
-	Pool *pgxpool.Pool
+	Pool                   *pgxpool.Pool
+	queueRetryPolicyMu     sync.Mutex
+	cachedQueueRetryPolicy *RetryPolicy
 }
 
 func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
@@ -23,12 +29,11 @@ func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
 	if !ok {
 		return fmt.Errorf("item does not implement BaseQueueEntry")
 	}
-	
+
 	query := psql.Insert(
 		im.Into(q.QueueName, "data", "meta", "updated_at"),
 		im.Values(psql.Arg(entry.GetBaseQueueEntry().Data, entry.GetBaseQueueEntry().Meta, psql.Raw("NOW()"))),
 	)
-
 
 	sql, args, err := query.Build(q.Ctx)
 	log.Println(sql, args)
@@ -185,4 +190,39 @@ func NewPgQueue[T interface{}](ctx context.Context, pool *pgxpool.Pool, queueNam
 		},
 		Pool: pool,
 	}
+}
+
+func (q *PgQueue[T]) GetRetryPolicy() (*RetryPolicy, error) {
+	if q.RetryPolicy != nil {
+		return q.RetryPolicy, nil
+	}
+
+	q.queueRetryPolicyMu.Lock()
+	defer q.queueRetryPolicyMu.Unlock()
+
+	if q.cachedQueueRetryPolicy != nil {
+		return q.cachedQueueRetryPolicy, nil
+	}
+
+	var rawPolicy []byte
+	err := q.Pool.QueryRow(
+		q.Ctx,
+		"SELECT retry_policy FROM queue_configs WHERE queue_name = $1 LIMIT 1",
+		q.QueueName,
+	).Scan(&rawPolicy)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("queue retry policy config not found; using env fallback", "queueName", q.QueueName)
+			return &RetryPolicy{}, nil
+		}
+		return nil, fmt.Errorf("could not load queue retry policy for %s: %w", q.QueueName, err)
+	}
+
+	var retryPolicy RetryPolicy
+	if err := json.Unmarshal(rawPolicy, &retryPolicy); err != nil {
+		return nil, fmt.Errorf("could not parse queue retry policy for %s: %w", q.QueueName, err)
+	}
+
+	q.cachedQueueRetryPolicy = &retryPolicy
+	return q.cachedQueueRetryPolicy, nil
 }
