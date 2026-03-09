@@ -78,7 +78,12 @@ func (w *Worker) Retry(task Task, tx pgx.Tx) (err error) {
 		return fmt.Errorf("could not resolve retry policy: %w", err)
 	}
 
-	if task.WillExceedMaxRetries(retryPolicy.MaxRetries) || retryPolicy == nil {
+	if retryPolicy == nil {
+		slog.Warn("retry policy not configured; treating max retries as 0")
+		return &MaxRetriesExceededError{Retries: meta.Retries, MaxRetries: 0}
+	}
+
+	if task.WillExceedMaxRetries(retryPolicy.MaxRetries) {
 		slog.Error("task has exceeded max retries")
 		return &MaxRetriesExceededError{Retries: meta.Retries, MaxRetries: retryPolicy.MaxRetries}
 	}

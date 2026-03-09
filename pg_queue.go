@@ -212,7 +212,7 @@ func (q *PgQueue[T]) GetRetryPolicy() (*RetryPolicy, error) {
 	).Scan(&rawPolicy)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			slog.Warn("queue retry policy config not found; using env fallback", "queueName", q.QueueName)
+			slog.Warn("queue retry policy config not found; using zero-value fallback", "queueName", q.QueueName)
 			return &RetryPolicy{}, nil
 		}
 		return nil, fmt.Errorf("could not load queue retry policy for %s: %w", q.QueueName, err)
