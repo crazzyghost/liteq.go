@@ -143,8 +143,6 @@ func (q *PgQueue[T]) CheckCondition(ctx context.Context, tx pgx.Tx, conditions .
 		return false, fmt.Errorf("could not build check query: %w", err)
 	}
 
-	log.Println(sql, args)
-
 	var exists int
 	err = tx.QueryRow(ctx, sql, args...).Scan(&exists)
 	if err != nil {
@@ -155,6 +153,65 @@ func (q *PgQueue[T]) CheckCondition(ctx context.Context, tx pgx.Tx, conditions .
 	}
 
 	return true, nil
+}
+
+// Select builds and executes a SELECT against the queue table.
+// sm.From is always prepended automatically so callers don't need it.
+// scan is called once per row; returning an error stops iteration immediately.
+// All filtering, ordering, and column selection is expressed as SelectMods
+// (e.g. sm.Where, sm.OrderBy, sm.Limit, sm.Columns).
+func (q *PgQueue[T]) Select(
+	ctx context.Context,
+	scan func(pgx.Rows) error,
+	mods ...SelectMod,
+) error {
+	tx, err := q.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("unable to start transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	query := psql.Select(append([]SelectMod{sm.From(q.QueueName)}, mods...)...)
+
+	sql, args, err := query.Build(ctx)
+	if err != nil {
+		return fmt.Errorf("could not build select query: %w", err)
+	}
+
+	rows, err := tx.Query(ctx, sql, args...)
+	if err != nil {
+		return fmt.Errorf("could not execute select query: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		if err := scan(rows); err != nil {
+			return err
+		}
+	}
+
+	return rows.Err()
+}
+
+// SelectOne executes a SELECT and calls scan for the first matching row.
+// Returns (true, nil) when a row was found, (false, nil) when none matched.
+// scan receives a pgx.Rows already positioned on the row — call rows.Scan()
+// directly inside it.
+func (q *PgQueue[T]) SelectOne(
+	ctx context.Context,
+	scan func(pgx.Rows) error,
+	mods ...SelectMod,
+) (bool, error) {
+	found := false
+	err := q.Select(
+		ctx,
+		func(rows pgx.Rows) error {
+			found = true
+			return scan(rows)
+		},
+		mods...,
+	)
+	return found, err
 }
 
 func (q *PgQueue[T]) UpdateStatus(ctx context.Context, tx pgx.Tx, status string, conditions ...Condition) error {

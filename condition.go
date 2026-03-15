@@ -164,11 +164,14 @@ func (c Condition) getExpression() psql.Expression {
 	return psql.Raw(b.String())
 }
 
+type SelectMod = bob.Mod[*dialect.SelectQuery]
+type UpdateMod = bob.Mod[*dialect.UpdateQuery]
+
 type SelectQuery interface {
-	Apply(mods ...bob.Mod[*dialect.SelectQuery])
+	Apply(mods ...SelectMod)
 }
 type UpdateQuery interface {
-	Apply(mods ...bob.Mod[*dialect.UpdateQuery])
+	Apply(mods ...UpdateMod)
 }
 
 func (c Condition) ApplyToSelect(query SelectQuery) {
