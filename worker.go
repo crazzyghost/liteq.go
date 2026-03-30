@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"math/rand/v2"
+	"runtime"
 	"sync"
 	"time"
 
@@ -20,6 +21,8 @@ type WorkerConfig struct {
 	TaskQueue          *PgQueue[Task]
 	DeadLetterQueue    *PgQueue[Task]
 	GetTaskRetryPolicy TaskRetryPolicySelector
+	MaxConcurrency     int           // default: runtime.NumCPU()
+	TaskTimeout        time.Duration // default: 30s
 }
 
 type Worker struct {
@@ -28,6 +31,10 @@ type Worker struct {
 	TaskQueue          *PgQueue[Task]
 	DeadLetterQueue    *PgQueue[Task]
 	GetTaskRetryPolicy TaskRetryPolicySelector
+	MaxConcurrency     int
+	TaskTimeout        time.Duration
+	done               chan struct{}
+	stopOnce           sync.Once
 }
 
 // NewWorker validates config and constructs a Worker. A non-nil error is
@@ -45,6 +52,12 @@ func NewWorker(ctx context.Context, config WorkerConfig) (*Worker, error) {
 	if config.TaskBatchSize < 1 {
 		return nil, fmt.Errorf("liteq: NewWorker: batchSize must be >= 1, got %d", config.TaskBatchSize)
 	}
+	if config.MaxConcurrency == 0 {
+		config.MaxConcurrency = runtime.NumCPU()
+	}
+	if config.TaskTimeout == 0 {
+		config.TaskTimeout = 30 * time.Second
+	}
 
 	return &Worker{
 		Ctx:                ctx,
@@ -52,7 +65,34 @@ func NewWorker(ctx context.Context, config WorkerConfig) (*Worker, error) {
 		TaskQueue:          config.TaskQueue,
 		DeadLetterQueue:    config.DeadLetterQueue,
 		GetTaskRetryPolicy: config.GetTaskRetryPolicy,
+		MaxConcurrency:     config.MaxConcurrency,
+		TaskTimeout:        config.TaskTimeout,
+		done:               make(chan struct{}),
 	}, nil
+}
+
+// Stop signals the worker to drain and exit. Safe to call multiple times.
+func (w *Worker) Stop() {
+	w.stopOnce.Do(func() { close(w.done) })
+}
+
+// Run polls in a loop until Stop() is called or ctx is cancelled.
+// Errors from individual Work() batches are logged but do not abort the loop.
+func (w *Worker) Run(ctx context.Context, factory ConsumerFactory, interval time.Duration) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-w.done:
+			return nil
+		case <-ticker.C:
+			if err := w.Work(ctx, factory); err != nil {
+				slog.Error("work batch error", slog.Any("error", err))
+			}
+		}
+	}
 }
 
 func (w *Worker) Poll() (tasks []Task, err error) {
@@ -157,55 +197,77 @@ func (w *Worker) dlqEnqueueWithRetry(ctx context.Context, task Task) error {
 	delays := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 300 * time.Millisecond}
 	var lastErr error
 	for _, delay := range delays {
-		tx, err := w.DeadLetterQueue.Pool.Begin(ctx)
+		tx, txCtx, cancel, err := w.DeadLetterQueue.beginTx(ctx)
 		if err != nil {
 			lastErr = err
 			time.Sleep(delay)
 			continue
 		}
 		if err := w.DlqEnqueue(task, tx); err != nil {
+			cancel()
 			rollback(tx)
 			lastErr = err
 			time.Sleep(delay)
 			continue
 		}
-		if err := tx.Commit(ctx); err != nil {
+		if err := tx.Commit(txCtx); err != nil {
+			cancel()
 			rollback(tx)
 			lastErr = err
 			time.Sleep(delay)
 			continue
 		}
+		cancel()
 		return nil
 	}
 
 	// Exhausted retries — mark task as DLQ_FAILED so it is not silently lost.
-	tx, err := w.TaskQueue.Pool.Begin(ctx)
+	tx, txCtx, cancel, err := w.TaskQueue.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("dlq enqueue failed after %d retries and could not start status update: %w",
 			len(delays), errors.Join(lastErr, err))
 	}
+	defer cancel()
 	defer rollback(tx)
 	if err := w.TaskQueue.UpdateStatus(ctx, tx, string(DLQ_FAILED), IDEquals(task.Id)); err != nil {
 		return fmt.Errorf("dlq enqueue failed after %d retries and status update failed: %w",
 			len(delays), errors.Join(lastErr, err))
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := tx.Commit(txCtx); err != nil {
 		return fmt.Errorf("dlq enqueue failed after %d retries and status update commit failed: %w",
 			len(delays), errors.Join(lastErr, err))
 	}
 	return fmt.Errorf("dlq enqueue failed after %d retries, marked DLQ_FAILED: %w", len(delays), lastErr)
 }
 
-func (w *Worker) HandleUnit(consumer Consumer, task Task) error {
-	consumerErr := consumer.Consume(task)
-	tx, dbErr := w.TaskQueue.Pool.Begin(w.Ctx)
+// HandleUnit runs the consumer for one task with a deadline, then commits the
+// result (completed, retry, or DLQ) inside a transaction. A timeout is treated
+// as a transient failure and follows the normal retry path.
+func (w *Worker) HandleUnit(ctx context.Context, task Task, consumer Consumer) error {
+	taskCtx, cancel := context.WithTimeout(ctx, w.TaskTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- consumer.Consume(taskCtx, task) }()
+
+	var consumerErr error
+	select {
+	case err := <-done:
+		consumerErr = err
+	case <-taskCtx.Done():
+		consumerErr = fmt.Errorf("task %s timed out after %s: %w",
+			task.Id, w.TaskTimeout, taskCtx.Err())
+	}
+
+	tx, txCtx, txCancel, dbErr := w.TaskQueue.beginTx(ctx)
 	if dbErr != nil {
 		return fmt.Errorf("could not start transaction: %w", dbErr)
 	}
+	defer txCancel()
 	defer rollback(tx)
 
 	if consumerErr != nil {
-		if err := w.HandleFailure(task, consumerErr, tx); err != nil {
+		if err := w.HandleFailure(ctx, task, consumerErr, tx); err != nil {
 			return fmt.Errorf("could not handle task failure: %v", err)
 		}
 	} else {
@@ -214,21 +276,21 @@ func (w *Worker) HandleUnit(consumer Consumer, task Task) error {
 		}
 	}
 
-	if dbErr = tx.Commit(w.Ctx); dbErr != nil {
+	if dbErr = tx.Commit(txCtx); dbErr != nil {
 		return fmt.Errorf("could not commit transaction: %w", dbErr)
 	}
 
 	return nil
 }
 
-func (w *Worker) HandleFailure(task Task, failure error, tx pgx.Tx) error {
+func (w *Worker) HandleFailure(ctx context.Context, task Task, failure error, tx pgx.Tx) error {
 	if err := w.HandleProcessed(task, FAILED, tx); err != nil {
 		return fmt.Errorf("could not mark task as failed: %w", err)
 	}
 
 	var consumerErr *ConsumerError
 	if errors.As(failure, &consumerErr) && consumerErr.IsNonTransient {
-		if err := w.dlqEnqueueWithRetry(w.Ctx, task); err != nil {
+		if err := w.dlqEnqueueWithRetry(ctx, task); err != nil {
 			return fmt.Errorf("could not push task to dead letter queue: %w", err)
 		}
 		return nil
@@ -237,7 +299,7 @@ func (w *Worker) HandleFailure(task Task, failure error, tx pgx.Tx) error {
 	if err := w.Retry(task, tx); err != nil {
 		var maxRetriesExceed *MaxRetriesExceededError
 		if errors.As(err, &maxRetriesExceed) {
-			if queueError := w.dlqEnqueueWithRetry(w.Ctx, task); queueError != nil {
+			if queueError := w.dlqEnqueueWithRetry(ctx, task); queueError != nil {
 				return fmt.Errorf("could not push task to dead letter queue: %w", queueError)
 			}
 			return nil
@@ -248,11 +310,24 @@ func (w *Worker) HandleFailure(task Task, failure error, tx pgx.Tx) error {
 	return nil
 }
 
-func (w *Worker) Work(factory ConsumerFactory) error {
+// Work dequeues one batch and processes all tasks using a bounded worker pool.
+// All tasks complete regardless of individual failures; errors are aggregated
+// into a BatchError.
+func (w *Worker) Work(ctx context.Context, factory ConsumerFactory) error {
 	tasks, err := w.Poll()
 	if err != nil {
 		return err
 	}
+	if len(tasks) == 0 {
+		return nil
+	}
+
+	numWorkers := min(w.MaxConcurrency, len(tasks))
+	taskCh := make(chan Task, len(tasks))
+	for _, t := range tasks {
+		taskCh <- t
+	}
+	close(taskCh)
 
 	var (
 		wg       sync.WaitGroup
@@ -260,18 +335,19 @@ func (w *Worker) Work(factory ConsumerFactory) error {
 		taskErrs []*TaskError
 	)
 
-	for _, task := range tasks {
+	for range numWorkers {
 		wg.Add(1)
-
-		go func(t Task) {
+		go func() {
 			defer wg.Done()
-			if err := w.HandleUnit(factory(), t); err != nil {
-				slog.Error("could not process task", slog.Any("error", err))
-				errsMu.Lock()
-				taskErrs = append(taskErrs, &TaskError{TaskID: t.Id, Err: err})
-				errsMu.Unlock()
+			for t := range taskCh {
+				if err := w.HandleUnit(ctx, t, factory()); err != nil {
+					slog.Error("could not process task", slog.Any("error", err))
+					errsMu.Lock()
+					taskErrs = append(taskErrs, &TaskError{TaskID: t.Id, Err: err})
+					errsMu.Unlock()
+				}
 			}
-		}(task)
+		}()
 	}
 
 	wg.Wait()

@@ -44,6 +44,7 @@ type BaseQueue struct {
 	Ctx         context.Context
 	QueueName   string
 	RetryPolicy *RetryPolicy
+	TxTimeout   time.Duration // default 5s; applied to every transaction begin
 }
 
 type BaseQueueEntryData interface{}

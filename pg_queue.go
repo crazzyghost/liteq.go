@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,6 +32,18 @@ func rollback(tx pgx.Tx) {
 	if err != nil && !errors.Is(err, pgx.ErrTxClosed) {
 		slog.Error("unexpected rollback error", "error", err)
 	}
+}
+
+// beginTx creates a context-scoped transaction with the queue's TxTimeout.
+// The caller must defer the returned cancel to avoid a context leak.
+func (q *PgQueue[T]) beginTx(ctx context.Context) (pgx.Tx, context.Context, context.CancelFunc, error) {
+	txCtx, cancel := context.WithTimeout(ctx, q.TxTimeout)
+	tx, err := q.Pool.Begin(txCtx)
+	if err != nil {
+		cancel()
+		return nil, nil, nil, fmt.Errorf("begin tx: %w", err)
+	}
+	return tx, txCtx, cancel, nil
 }
 
 func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
@@ -58,11 +71,11 @@ func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
 }
 
 func (q *PgQueue[T]) Dequeue(batchSize int) (tasks []T, err error) {
-	tx, err := q.Pool.Begin(q.Ctx)
+	tx, txCtx, cancel, err := q.beginTx(q.Ctx)
 	if err != nil {
 		return nil, fmt.Errorf("unable to start transaction: %w", err)
 	}
-
+	defer cancel()
 	defer rollback(tx)
 
 	rawQuery := `
@@ -90,7 +103,7 @@ func (q *PgQueue[T]) Dequeue(batchSize int) (tasks []T, err error) {
 		psql.Quote(q.QueueName).String(),
 	)
 
-	rows, err := tx.Query(q.Ctx, sql, batchSize)
+	rows, err := tx.Query(txCtx, sql, batchSize)
 	if err != nil {
 		return nil, fmt.Errorf("unable to claim tasks: %w", err)
 	}
@@ -101,7 +114,7 @@ func (q *PgQueue[T]) Dequeue(batchSize int) (tasks []T, err error) {
 		return nil, fmt.Errorf("unable to collect rows: %w", err)
 	}
 
-	if err := tx.Commit(q.Ctx); err != nil {
+	if err := tx.Commit(txCtx); err != nil {
 		return nil, fmt.Errorf("dequeue commit: %w", err)
 	}
 	return tasks, nil
@@ -175,20 +188,21 @@ func (q *PgQueue[T]) Select(
 	scan func(pgx.Rows) error,
 	mods ...SelectMod,
 ) error {
-	tx, err := q.Pool.Begin(ctx)
+	tx, txCtx, cancel, err := q.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("unable to start transaction: %w", err)
 	}
+	defer cancel()
 	defer rollback(tx)
 
 	query := psql.Select(append([]SelectMod{sm.From(q.QueueName)}, mods...)...)
 
-	sql, args, err := query.Build(ctx)
+	sql, args, err := query.Build(txCtx)
 	if err != nil {
 		return fmt.Errorf("could not build select query: %w", err)
 	}
 
-	rows, err := tx.Query(ctx, sql, args...)
+	rows, err := tx.Query(txCtx, sql, args...)
 	if err != nil {
 		return fmt.Errorf("could not execute select query: %w", err)
 	}
@@ -279,6 +293,7 @@ func NewPgQueue[T interface{}](ctx context.Context, pool *pgxpool.Pool, queueNam
 			Ctx:         ctx,
 			QueueName:   queueName,
 			RetryPolicy: retryPolicy,
+			TxTimeout:   5 * time.Second,
 		},
 		Pool: pool,
 	}, nil
