@@ -150,6 +150,52 @@ func (w *Worker) DlqEnqueue(task Task, tx pgx.Tx) (err error) {
 	return nil
 }
 
+// dlqEnqueueWithRetry attempts to enqueue a task into the dead-letter queue
+// with up to 3 retries and linear backoff (100ms, 200ms, 300ms). On exhaustion,
+// the task is marked DLQ_FAILED in the task queue so it can be recovered manually.
+func (w *Worker) dlqEnqueueWithRetry(ctx context.Context, task Task) error {
+	delays := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 300 * time.Millisecond}
+	var lastErr error
+	for _, delay := range delays {
+		tx, err := w.DeadLetterQueue.Pool.Begin(ctx)
+		if err != nil {
+			lastErr = err
+			time.Sleep(delay)
+			continue
+		}
+		if err := w.DlqEnqueue(task, tx); err != nil {
+			rollback(tx)
+			lastErr = err
+			time.Sleep(delay)
+			continue
+		}
+		if err := tx.Commit(ctx); err != nil {
+			rollback(tx)
+			lastErr = err
+			time.Sleep(delay)
+			continue
+		}
+		return nil
+	}
+
+	// Exhausted retries — mark task as DLQ_FAILED so it is not silently lost.
+	tx, err := w.TaskQueue.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("dlq enqueue failed after %d retries and could not start status update: %w",
+			len(delays), errors.Join(lastErr, err))
+	}
+	defer rollback(tx)
+	if err := w.TaskQueue.UpdateStatus(ctx, tx, string(DLQ_FAILED), IDEquals(task.Id)); err != nil {
+		return fmt.Errorf("dlq enqueue failed after %d retries and status update failed: %w",
+			len(delays), errors.Join(lastErr, err))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("dlq enqueue failed after %d retries and status update commit failed: %w",
+			len(delays), errors.Join(lastErr, err))
+	}
+	return fmt.Errorf("dlq enqueue failed after %d retries, marked DLQ_FAILED: %w", len(delays), lastErr)
+}
+
 func (w *Worker) HandleUnit(consumer Consumer, task Task) error {
 	consumerErr := consumer.Consume(task)
 	tx, dbErr := w.TaskQueue.Pool.Begin(w.Ctx)
@@ -182,7 +228,7 @@ func (w *Worker) HandleFailure(task Task, failure error, tx pgx.Tx) error {
 
 	var consumerErr *ConsumerError
 	if errors.As(failure, &consumerErr) && consumerErr.IsNonTransient {
-		if err := w.DlqEnqueue(task, tx); err != nil {
+		if err := w.dlqEnqueueWithRetry(w.Ctx, task); err != nil {
 			return fmt.Errorf("could not push task to dead letter queue: %w", err)
 		}
 		return nil
@@ -191,7 +237,7 @@ func (w *Worker) HandleFailure(task Task, failure error, tx pgx.Tx) error {
 	if err := w.Retry(task, tx); err != nil {
 		var maxRetriesExceed *MaxRetriesExceededError
 		if errors.As(err, &maxRetriesExceed) {
-			if queueError := w.DlqEnqueue(task, tx); queueError != nil {
+			if queueError := w.dlqEnqueueWithRetry(w.Ctx, task); queueError != nil {
 				return fmt.Errorf("could not push task to dead letter queue: %w", queueError)
 			}
 			return nil
@@ -202,16 +248,16 @@ func (w *Worker) HandleFailure(task Task, failure error, tx pgx.Tx) error {
 	return nil
 }
 
-func (w *Worker) Work(consumerFactory ConsumerFactory) error {
+func (w *Worker) Work(factory ConsumerFactory) error {
 	tasks, err := w.Poll()
 	if err != nil {
 		return err
 	}
 
 	var (
-		wg     sync.WaitGroup
-		errsMu sync.Mutex
-		errs   []error
+		wg       sync.WaitGroup
+		errsMu   sync.Mutex
+		taskErrs []*TaskError
 	)
 
 	for _, task := range tasks {
@@ -219,10 +265,10 @@ func (w *Worker) Work(consumerFactory ConsumerFactory) error {
 
 		go func(t Task) {
 			defer wg.Done()
-			if err := w.HandleUnit(consumerFactory(), t); err != nil {
+			if err := w.HandleUnit(factory(), t); err != nil {
 				slog.Error("could not process task", slog.Any("error", err))
 				errsMu.Lock()
-				errs = append(errs, err)
+				taskErrs = append(taskErrs, &TaskError{TaskID: t.Id, Err: err})
 				errsMu.Unlock()
 			}
 		}(task)
@@ -230,5 +276,12 @@ func (w *Worker) Work(consumerFactory ConsumerFactory) error {
 
 	wg.Wait()
 
-	return errors.Join(errs...)
+	if len(taskErrs) == 0 {
+		return nil
+	}
+	return &BatchError{
+		Total:  len(tasks),
+		Failed: len(taskErrs),
+		Errors: taskErrs,
+	}
 }
