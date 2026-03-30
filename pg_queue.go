@@ -248,7 +248,32 @@ func (q *PgQueue[T]) UpdateStatus(ctx context.Context, tx pgx.Tx, status string,
 	return nil
 }
 
-func NewPgQueue[T interface{}](ctx context.Context, pool *pgxpool.Pool, queueName string, retryPolicy *RetryPolicy) *PgQueue[T] {
+// NewPgQueue validates its inputs and constructs a PgQueue. A non-nil error is
+// returned when any required argument is missing or the retry policy is invalid.
+func NewPgQueue[T interface{}](ctx context.Context, pool *pgxpool.Pool, queueName string, retryPolicy *RetryPolicy) (*PgQueue[T], error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("liteq: NewPgQueue: ctx must not be nil")
+	}
+	if pool == nil {
+		return nil, fmt.Errorf("liteq: NewPgQueue: pool must not be nil")
+	}
+	if queueName == "" {
+		return nil, fmt.Errorf("liteq: NewPgQueue: name must not be empty")
+	}
+	if retryPolicy != nil {
+		if retryPolicy.MaxRetries < 0 {
+			return nil, fmt.Errorf("liteq: NewPgQueue: retryPolicy.MaxRetries must be >= 0")
+		}
+		if retryPolicy.RetryDelayMs <= 0 {
+			return nil, fmt.Errorf("liteq: NewPgQueue: retryPolicy.RetryDelayMs must be > 0")
+		}
+		canonical, err := ParseRetryStrategy(retryPolicy.Strategy)
+		if err != nil {
+			return nil, fmt.Errorf("liteq: NewPgQueue: retryPolicy.Strategy: %w", err)
+		}
+		retryPolicy.Strategy = canonical
+	}
+
 	return &PgQueue[T]{
 		BaseQueue: BaseQueue{
 			Ctx:         ctx,
@@ -256,7 +281,7 @@ func NewPgQueue[T interface{}](ctx context.Context, pool *pgxpool.Pool, queueNam
 			RetryPolicy: retryPolicy,
 		},
 		Pool: pool,
-	}
+	}, nil
 }
 
 func (q *PgQueue[T]) GetRetryPolicy(ctx context.Context) (*RetryPolicy, error) {

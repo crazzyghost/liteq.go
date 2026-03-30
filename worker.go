@@ -30,14 +30,29 @@ type Worker struct {
 	GetTaskRetryPolicy TaskRetryPolicySelector
 }
 
-func NewWorker(ctx context.Context, config WorkerConfig) *Worker {
+// NewWorker validates config and constructs a Worker. A non-nil error is
+// returned when any required field is missing or has an invalid value.
+func NewWorker(ctx context.Context, config WorkerConfig) (*Worker, error) {
+	if config.TaskQueue == nil {
+		return nil, fmt.Errorf("liteq: NewWorker: queue must not be nil")
+	}
+	if config.DeadLetterQueue == nil {
+		return nil, fmt.Errorf("liteq: NewWorker: dlq must not be nil")
+	}
+	if config.TaskBatchSize == 0 {
+		config.TaskBatchSize = 10
+	}
+	if config.TaskBatchSize < 1 {
+		return nil, fmt.Errorf("liteq: NewWorker: batchSize must be >= 1, got %d", config.TaskBatchSize)
+	}
+
 	return &Worker{
 		Ctx:                ctx,
 		TaskBatchSize:      config.TaskBatchSize,
 		TaskQueue:          config.TaskQueue,
 		DeadLetterQueue:    config.DeadLetterQueue,
 		GetTaskRetryPolicy: config.GetTaskRetryPolicy,
-	}
+	}, nil
 }
 
 func (w *Worker) Poll() (tasks []Task, err error) {
@@ -59,16 +74,30 @@ func (w *Worker) HandleProcessed(task Task, status TaskStatus, tx pgx.Tx) (err e
 	return nil
 }
 
-func (w *Worker) GetRetrySchedule(task *Task, retryPolicy *RetryPolicy) (nextRunAt time.Time) {
+// GetRetrySchedule calculates the next run time for a task based on the retry
+// policy strategy. Supported strategies are fixed, linear, and exponential
+// (default). A jitter in the range [0, delayMs] is applied to spread load.
+func (w *Worker) GetRetrySchedule(task *Task, retryPolicy *RetryPolicy) (time.Time, error) {
 	retries := task.Meta.Retries
 
-	backoff := retryPolicy.RetryDelayMs * int(math.Pow(2, float64(retries)))
-	maxBackoff := min(backoff, retryPolicy.MaxDelayMs)
+	strategy, err := ParseRetryStrategy(retryPolicy.Strategy)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid retry strategy: %w", err)
+	}
 
-	backoffMs := rand.IntN(maxBackoff + 1)
-	nextRunAt = time.Now().Add(time.Duration(backoffMs) * time.Millisecond)
+	var delayMs int
+	switch strategy {
+	case StrategyFixed:
+		delayMs = retryPolicy.RetryDelayMs
+	case StrategyLinear:
+		delayMs = min(retryPolicy.RetryDelayMs*(retries+1), retryPolicy.MaxDelayMs)
+	default: // StrategyExponential
+		backoff := retryPolicy.RetryDelayMs * int(math.Pow(2, float64(retries)))
+		delayMs = min(backoff, retryPolicy.MaxDelayMs)
+	}
 
-	return nextRunAt
+	jitteredMs := rand.IntN(delayMs + 1)
+	return time.Now().Add(time.Duration(jitteredMs) * time.Millisecond), nil
 }
 
 func (w *Worker) Retry(task Task, tx pgx.Tx) (err error) {
@@ -88,7 +117,10 @@ func (w *Worker) Retry(task Task, tx pgx.Tx) (err error) {
 		return &MaxRetriesExceededError{Retries: meta.Retries, MaxRetries: retryPolicy.MaxRetries}
 	}
 
-	nextRunAt := w.GetRetrySchedule(&task, retryPolicy)
+	nextRunAt, err := w.GetRetrySchedule(&task, retryPolicy)
+	if err != nil {
+		return fmt.Errorf("could not compute retry schedule: %w", err)
+	}
 
 	task.Meta.IsRetry = true
 	task.Meta.Retries += 1

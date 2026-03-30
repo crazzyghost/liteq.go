@@ -2,8 +2,30 @@ package liteq
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
+
+const (
+	StrategyFixed       = "fixed"
+	StrategyExponential = "exponential"
+	StrategyLinear      = "linear"
+)
+
+// ParseRetryStrategy validates and normalises a retry strategy string.
+// An empty string is treated as the default exponential strategy.
+func ParseRetryStrategy(s string) (string, error) {
+	switch s {
+	case "", StrategyExponential:
+		return StrategyExponential, nil
+	case StrategyFixed:
+		return StrategyFixed, nil
+	case StrategyLinear:
+		return StrategyLinear, nil
+	default:
+		return "", fmt.Errorf("unknown retry strategy %q, want one of: fixed, exponential, linear", s)
+	}
+}
 
 type RetryPolicy struct {
 	Strategy     string `json:"strategy"`
