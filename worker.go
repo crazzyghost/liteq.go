@@ -124,7 +124,7 @@ func (w *Worker) HandleUnit(consumer Consumer, task Task) error {
 	if dbErr != nil {
 		return fmt.Errorf("could not start transaction: %w", dbErr)
 	}
-	defer tx.Rollback(w.Ctx)
+	defer rollback(tx)
 
 	if consumerErr != nil {
 		if err := w.HandleFailure(task, consumerErr, tx); err != nil {
@@ -170,27 +170,33 @@ func (w *Worker) HandleFailure(task Task, failure error, tx pgx.Tx) error {
 	return nil
 }
 
-func (w *Worker) Work(consumerFactory ConsumerFactory) (err error) {
+func (w *Worker) Work(consumerFactory ConsumerFactory) error {
 	tasks, err := w.Poll()
 	if err != nil {
 		return err
 	}
 
-	var wg sync.WaitGroup
+	var (
+		wg     sync.WaitGroup
+		errsMu sync.Mutex
+		errs   []error
+	)
 
 	for _, task := range tasks {
 		wg.Add(1)
 
 		go func(t Task) {
 			defer wg.Done()
-			if err = w.HandleUnit(consumerFactory(), task); err != nil {
+			if err := w.HandleUnit(consumerFactory(), t); err != nil {
 				slog.Error("could not process task", slog.Any("error", err))
+				errsMu.Lock()
+				errs = append(errs, err)
+				errsMu.Unlock()
 			}
 		}(task)
-
 	}
 
 	wg.Wait()
 
-	return nil
+	return errors.Join(errs...)
 }

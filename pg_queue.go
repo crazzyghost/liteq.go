@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"log/slog"
 	"sync"
 
@@ -19,9 +18,19 @@ import (
 
 type PgQueue[T interface{}] struct {
 	BaseQueue
-	Pool                   *pgxpool.Pool
-	queueRetryPolicyMu     sync.Mutex
-	cachedQueueRetryPolicy *RetryPolicy
+	Pool            *pgxpool.Pool
+	retryPolicyOnce sync.Once
+	retryPolicyVal  *RetryPolicy
+	retryPolicyErr  error
+}
+
+// rollback executes a transaction rollback, suppressing pgx.ErrTxClosed which
+// is expected after a successful Commit, and logging any other error.
+func rollback(tx pgx.Tx) {
+	err := tx.Rollback(context.Background())
+	if err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+		slog.Error("unexpected rollback error", "error", err)
+	}
 }
 
 func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
@@ -36,7 +45,6 @@ func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
 	)
 
 	sql, args, err := query.Build(q.Ctx)
-	log.Println(sql, args)
 	if err != nil {
 		return fmt.Errorf("could not build enqueue query: %w", err)
 	}
@@ -55,7 +63,7 @@ func (q *PgQueue[T]) Dequeue(batchSize int) (tasks []T, err error) {
 		return nil, fmt.Errorf("unable to start transaction: %w", err)
 	}
 
-	defer tx.Rollback(q.Ctx)
+	defer rollback(tx)
 
 	rawQuery := `
 		WITH claimed_tasks AS(
@@ -93,7 +101,9 @@ func (q *PgQueue[T]) Dequeue(batchSize int) (tasks []T, err error) {
 		return nil, fmt.Errorf("unable to collect rows: %w", err)
 	}
 
-	tx.Commit(q.Ctx)
+	if err := tx.Commit(q.Ctx); err != nil {
+		return nil, fmt.Errorf("dequeue commit: %w", err)
+	}
 	return tasks, nil
 }
 
@@ -169,7 +179,7 @@ func (q *PgQueue[T]) Select(
 	if err != nil {
 		return fmt.Errorf("unable to start transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer rollback(tx)
 
 	query := psql.Select(append([]SelectMod{sm.From(q.QueueName)}, mods...)...)
 
@@ -217,7 +227,7 @@ func (q *PgQueue[T]) SelectOne(
 func (q *PgQueue[T]) UpdateStatus(ctx context.Context, tx pgx.Tx, status string, conditions ...Condition) error {
 	query := psql.Update(
 		um.Table(q.QueueName),
-		um.SetCol("meta").To(psql.Raw(fmt.Sprintf(`jsonb_set(meta, '{status}', '"%s"', true)`, status))),
+		um.SetCol("meta").To(psql.Raw("jsonb_set(meta, '{status}', to_jsonb(?::text), true)", status)),
 		um.SetCol("updated_at").To(psql.Raw("NOW()")),
 	)
 
@@ -249,21 +259,20 @@ func NewPgQueue[T interface{}](ctx context.Context, pool *pgxpool.Pool, queueNam
 	}
 }
 
-func (q *PgQueue[T]) GetRetryPolicy() (*RetryPolicy, error) {
+func (q *PgQueue[T]) GetRetryPolicy(ctx context.Context) (*RetryPolicy, error) {
 	if q.RetryPolicy != nil {
 		return q.RetryPolicy, nil
 	}
+	q.retryPolicyOnce.Do(func() {
+		q.retryPolicyVal, q.retryPolicyErr = q.loadRetryPolicy(ctx)
+	})
+	return q.retryPolicyVal, q.retryPolicyErr
+}
 
-	q.queueRetryPolicyMu.Lock()
-	defer q.queueRetryPolicyMu.Unlock()
-
-	if q.cachedQueueRetryPolicy != nil {
-		return q.cachedQueueRetryPolicy, nil
-	}
-
+func (q *PgQueue[T]) loadRetryPolicy(ctx context.Context) (*RetryPolicy, error) {
 	var rawPolicy []byte
 	err := q.Pool.QueryRow(
-		q.Ctx,
+		ctx,
 		"SELECT retry_policy FROM queue_configs WHERE queue_name = $1 LIMIT 1",
 		q.QueueName,
 	).Scan(&rawPolicy)
@@ -280,6 +289,5 @@ func (q *PgQueue[T]) GetRetryPolicy() (*RetryPolicy, error) {
 		return nil, fmt.Errorf("could not parse queue retry policy for %s: %w", q.QueueName, err)
 	}
 
-	q.cachedQueueRetryPolicy = &retryPolicy
-	return q.cachedQueueRetryPolicy, nil
+	return &retryPolicy, nil
 }
