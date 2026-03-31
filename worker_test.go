@@ -191,7 +191,7 @@ func TestWorker_Run_CancelledCtx(t *testing.T) {
 func TestGetRetrySchedule_Fixed(t *testing.T) {
 	w := newTestWorker(t)
 	task := newTestTask("t1")
-	task.Meta.Retries = 0
+	task.Retries = 0
 	policy := &RetryPolicy{Strategy: StrategyFixed, RetryDelayMs: 200, MaxDelayMs: 1000}
 
 	before := time.Now()
@@ -212,7 +212,7 @@ func TestGetRetrySchedule_Fixed(t *testing.T) {
 func TestGetRetrySchedule_Linear(t *testing.T) {
 	w := newTestWorker(t)
 	task := newTestTask("t1")
-	task.Meta.Retries = 2 // delay = 100*(2+1) = 300ms, capped at MaxDelay
+	task.Retries = 2 // delay = 100*(2+1) = 300ms, capped at MaxDelay
 	policy := &RetryPolicy{Strategy: StrategyLinear, RetryDelayMs: 100, MaxDelayMs: 500}
 
 	before := time.Now()
@@ -228,7 +228,7 @@ func TestGetRetrySchedule_Linear(t *testing.T) {
 func TestGetRetrySchedule_Exponential(t *testing.T) {
 	w := newTestWorker(t)
 	task := newTestTask("t1")
-	task.Meta.Retries = 3 // 100 * 2^3 = 800ms, under MaxDelay
+	task.Retries = 3 // 100 * 2^3 = 800ms, under MaxDelay
 	policy := &RetryPolicy{Strategy: StrategyExponential, RetryDelayMs: 100, MaxDelayMs: 10000}
 
 	before := time.Now()
@@ -244,7 +244,7 @@ func TestGetRetrySchedule_Exponential(t *testing.T) {
 func TestGetRetrySchedule_ExponentialMaxDelayCap(t *testing.T) {
 	w := newTestWorker(t)
 	task := newTestTask("t1")
-	task.Meta.Retries = 20 // would be astronomically large without cap
+	task.Retries = 20 // would be astronomically large without cap
 	policy := &RetryPolicy{Strategy: StrategyExponential, RetryDelayMs: 100, MaxDelayMs: 500}
 
 	before := time.Now()
@@ -276,7 +276,7 @@ func TestGetRetrySchedule_InvalidStrategy(t *testing.T) {
 func TestGetRetrySchedule_LinearMaxDelayCap(t *testing.T) {
 	w := newTestWorker(t)
 	task := newTestTask("t1")
-	task.Meta.Retries = 100 // 100 * 101 = 10100ms, exceeds MaxDelayMs=500
+	task.Retries = 100 // 100 * 101 = 10100ms, exceeds MaxDelayMs=500
 	policy := &RetryPolicy{Strategy: StrategyLinear, RetryDelayMs: 100, MaxDelayMs: 500}
 
 	before := time.Now()
@@ -321,7 +321,7 @@ func TestRetry_MaxRetriesExceeded(t *testing.T) {
 	}
 
 	task := newTestTask("t1")
-	task.Meta.Retries = 0 // WillExceedMaxRetries(0): (0+1) > 0 = true
+	task.Retries = 0 // WillExceedMaxRetries(0): (0+1) > 0 = true
 
 	err := w.Retry(context.Background(), task, nil)
 

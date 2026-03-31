@@ -36,12 +36,6 @@ type RetryPolicy struct {
 	MaxDelayMs   int    `json:"maxDelayMs"`
 }
 
-type ScheduleConfig struct {
-	DelayMs        int    `json:"delayMs"`
-	CronExpression string `json:"cronExpression"`
-	Timezone       string `json:"timezone"`
-}
-
 type BaseQueue struct {
 	Ctx         context.Context
 	Schema      string
@@ -56,26 +50,21 @@ func (q BaseQueue) QualifiedQueueName() string {
 
 type BaseQueueEntryData interface{}
 
-type BaseQueueEntryMetaData struct {
-	Status         string         `json:"status"`
-	IsRetry        bool           `json:"isRetry"`
-	RetryPolicy    *RetryPolicy   `json:"retryPolicy"`
-	Retries        int            `json:"retries"`
-	ScheduleConfig ScheduleConfig `json:"scheduleConfig"`
-	NextRunAt      *time.Time     `json:"nextRunAt"`
-	LastRunAt      *time.Time     `json:"lastRunAt"`
-	ProcessedAt    *time.Time     `json:"processedAt"`
-}
-
 type BaseQueueEntry struct {
-	Id         string                 `json:"id"`
-	Data       BaseQueueEntryData     `json:"data"`
-	Meta       BaseQueueEntryMetaData `json:"meta"`
-	EnqueuedAt *time.Time             `json:"enqueued_at"`
-	DequeuedAt *time.Time             `json:"dequeued_at"`
-	CreatedAt  *time.Time             `json:"created_at"`
-	UpdatedAt  *time.Time             `json:"updated_at"`
-	DeletedAt  *time.Time             `json:"deleted_at"`
+	Id          string             `json:"id" db:"id"`
+	Data        BaseQueueEntryData `json:"data" db:"data"`
+	Status      string             `json:"status" db:"status"`
+	IsRetry     bool               `json:"isRetry" db:"is_retry"`
+	Retries     int                `json:"retries" db:"retries"`
+	RetryPolicy *RetryPolicy       `json:"retryPolicy" db:"retry_policy"`
+	NextRunAt   *time.Time         `json:"nextRunAt" db:"next_run_at"`
+	LastRunAt   *time.Time         `json:"lastRunAt" db:"last_run_at"`
+	ProcessedAt *time.Time         `json:"processedAt" db:"processed_at"`
+	EnqueuedAt  *time.Time         `json:"enqueued_at" db:"enqueued_at"`
+	DequeuedAt  *time.Time         `json:"dequeued_at" db:"dequeued_at"`
+	CreatedAt   *time.Time         `json:"created_at" db:"created_at"`
+	UpdatedAt   *time.Time         `json:"updated_at" db:"updated_at"`
+	DeletedAt   *time.Time         `json:"deleted_at" db:"deleted_at"`
 }
 
 type IQueueEntry interface {

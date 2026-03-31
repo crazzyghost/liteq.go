@@ -215,7 +215,7 @@ func TestWillExceedMaxRetries(t *testing.T) {
 	}
 	for _, tc := range tests {
 		task := newTestTask("t")
-		task.Meta.Retries = tc.retries
+		task.Retries = tc.retries
 		got := task.WillExceedMaxRetries(tc.maxRetries)
 		if got != tc.want {
 			t.Errorf("WillExceedMaxRetries(retries=%d, max=%d) = %v, want %v",

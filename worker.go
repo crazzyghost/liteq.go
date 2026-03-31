@@ -108,9 +108,9 @@ func (w *Worker) Poll(ctx context.Context) (tasks []Task, err error) {
 }
 
 func (w *Worker) HandleProcessed(ctx context.Context, task Task, status TaskStatus, tx pgx.Tx, start time.Time) (err error) {
-	task.Meta.Status = string(status)
+	task.Status = string(status)
 
-	err = w.TaskQueue.UpdateQueueEntryMeta(task, tx)
+	err = w.TaskQueue.UpdateEntry(task, tx)
 	if err != nil {
 		return err
 	}
@@ -124,7 +124,7 @@ func (w *Worker) HandleProcessed(ctx context.Context, task Task, status TaskStat
 // policy strategy. Supported strategies are fixed, linear, and exponential
 // (default). A jitter in the range [0, delayMs] is applied to spread load.
 func (w *Worker) GetRetrySchedule(task *Task, retryPolicy *RetryPolicy) (time.Time, error) {
-	retries := task.Meta.Retries
+	retries := task.Retries
 
 	strategy, err := ParseRetryStrategy(retryPolicy.Strategy)
 	if err != nil {
@@ -147,18 +147,17 @@ func (w *Worker) GetRetrySchedule(task *Task, retryPolicy *RetryPolicy) (time.Ti
 }
 
 func (w *Worker) Retry(ctx context.Context, task Task, tx pgx.Tx) (err error) {
-	meta := task.Meta
 	retryPolicy, err := w.GetTaskRetryPolicy(task)
 	if err != nil {
 		return fmt.Errorf("could not resolve retry policy: %w", err)
 	}
 
 	if retryPolicy == nil {
-		return &MaxRetriesExceededError{Retries: meta.Retries, MaxRetries: 0}
+		return &MaxRetriesExceededError{Retries: task.Retries, MaxRetries: 0}
 	}
 
 	if task.WillExceedMaxRetries(retryPolicy.MaxRetries) {
-		return &MaxRetriesExceededError{Retries: meta.Retries, MaxRetries: retryPolicy.MaxRetries}
+		return &MaxRetriesExceededError{Retries: task.Retries, MaxRetries: retryPolicy.MaxRetries}
 	}
 
 	nextRunAt, err := w.GetRetrySchedule(&task, retryPolicy)
@@ -166,10 +165,10 @@ func (w *Worker) Retry(ctx context.Context, task Task, tx pgx.Tx) (err error) {
 		return fmt.Errorf("could not compute retry schedule: %w", err)
 	}
 
-	task.Meta.IsRetry = true
-	task.Meta.Retries += 1
-	task.Meta.NextRunAt = &nextRunAt
-	task.Meta.Status = "PENDING"
+	task.IsRetry = true
+	task.Retries += 1
+	task.NextRunAt = &nextRunAt
+	task.Status = "PENDING"
 
 	err = w.TaskQueue.Enqueue(task, tx)
 	if err != nil {
@@ -177,15 +176,15 @@ func (w *Worker) Retry(ctx context.Context, task Task, tx pgx.Tx) (err error) {
 	}
 
 	safeHook(func() { w.hooks.OnEnqueue(ctx, w.TaskQueue.QueueName, task.Id) })
-	safeHook(func() { w.hooks.OnRetry(ctx, task.Id, task.Meta.Retries, nextRunAt) })
+	safeHook(func() { w.hooks.OnRetry(ctx, task.Id, task.Retries, nextRunAt) })
 	return nil
 }
 
 func (w *Worker) DlqEnqueue(ctx context.Context, task Task, tx pgx.Tx) (err error) {
-	task.Meta.Status = string(FAILED)
-	task.Meta.IsRetry = false
-	task.Meta.LastRunAt = task.Meta.NextRunAt
-	task.Meta.NextRunAt = nil
+	task.Status = string(FAILED)
+	task.IsRetry = false
+	task.LastRunAt = task.NextRunAt
+	task.NextRunAt = nil
 	err = w.DeadLetterQueue.Enqueue(task, tx)
 	if err != nil {
 		return err

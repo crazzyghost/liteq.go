@@ -57,11 +57,31 @@ func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
 	}
 
 	query := psql.Insert(
-		im.Into(q.queueTable(), "id", "data", "meta", "updated_at"),
+		im.Into(
+			q.queueTable(),
+			"id",
+			"data",
+			"status",
+			"is_retry",
+			"retries",
+			"retry_policy",
+			"next_run_at",
+			"last_run_at",
+			"processed_at",
+			"enqueued_at",
+			"updated_at",
+		),
 		im.Values(psql.Arg(
 			entry.GetBaseQueueEntry().Id,
 			entry.GetBaseQueueEntry().Data,
-			entry.GetBaseQueueEntry().Meta,
+			entry.GetBaseQueueEntry().Status,
+			entry.GetBaseQueueEntry().IsRetry,
+			entry.GetBaseQueueEntry().Retries,
+			entry.GetBaseQueueEntry().RetryPolicy,
+			entry.GetBaseQueueEntry().NextRunAt,
+			entry.GetBaseQueueEntry().LastRunAt,
+			entry.GetBaseQueueEntry().ProcessedAt,
+			psql.Raw("NOW()"),
 			psql.Raw("NOW()"),
 		)),
 	)
@@ -92,20 +112,19 @@ func (q *PgQueue[T]) Dequeue(batchSize int) (tasks []T, err error) {
 		WITH claimed_tasks AS(
 			SELECT *
 			FROM %s
-			WHERE (
-				((meta->>'status')::text = 'PENDING' AND (meta->>'isRetry')::boolean = FALSE AND deleted_at IS NULL) OR
-				((meta->>'status')::text = 'PENDING' AND (meta->>'isRetry')::boolean = TRUE  AND (meta->>'nextRunAt')::timestamp <= NOW() AND deleted_at IS NULL)
-			)
+			WHERE status = 'PENDING'
+			  AND deleted_at IS NULL
+			  AND (is_retry = FALSE OR (is_retry = TRUE AND next_run_at <= NOW()))
 			ORDER BY created_at ASC
 			FOR UPDATE SKIP LOCKED LIMIT $1
 		)
 		UPDATE %s
-        SET meta = jsonb_set(%s.meta, '{status}','"RUNNING"', true), dequeued_at = NOW(), updated_at = NOW()
+		SET status = 'RUNNING', dequeued_at = NOW(), updated_at = NOW()
 		FROM claimed_tasks
 		WHERE %s.id = claimed_tasks.id
 		RETURNING %s.*
 	`
-	sql := fmt.Sprintf(rawQuery, table, table, table, table, table)
+	sql := fmt.Sprintf(rawQuery, table, table, table, table)
 
 	rows, err := tx.Query(txCtx, sql, batchSize)
 	if err != nil {
@@ -124,7 +143,7 @@ func (q *PgQueue[T]) Dequeue(batchSize int) (tasks []T, err error) {
 	return tasks, nil
 }
 
-func (q *PgQueue[T]) UpdateQueueEntryMeta(item T, tx pgx.Tx, conditions ...Condition) error {
+func (q *PgQueue[T]) UpdateEntry(item T, tx pgx.Tx, conditions ...Condition) error {
 	entry, ok := interface{}(&item).(IQueueEntry)
 	if !ok {
 		return fmt.Errorf("item does not implement GetBaseQueueEntry")
@@ -132,7 +151,13 @@ func (q *PgQueue[T]) UpdateQueueEntryMeta(item T, tx pgx.Tx, conditions ...Condi
 
 	query := psql.Update(
 		um.Table(q.queueTable()),
-		um.SetCol("meta").ToArg(entry.GetBaseQueueEntry().Meta),
+		um.SetCol("status").ToArg(entry.GetBaseQueueEntry().Status),
+		um.SetCol("is_retry").ToArg(entry.GetBaseQueueEntry().IsRetry),
+		um.SetCol("retries").ToArg(entry.GetBaseQueueEntry().Retries),
+		um.SetCol("retry_policy").ToArg(entry.GetBaseQueueEntry().RetryPolicy),
+		um.SetCol("next_run_at").ToArg(entry.GetBaseQueueEntry().NextRunAt),
+		um.SetCol("last_run_at").ToArg(entry.GetBaseQueueEntry().LastRunAt),
+		um.SetCol("processed_at").ToArg(entry.GetBaseQueueEntry().ProcessedAt),
 		um.SetCol("updated_at").To(psql.Raw("NOW()")),
 	)
 
@@ -149,7 +174,7 @@ func (q *PgQueue[T]) UpdateQueueEntryMeta(item T, tx pgx.Tx, conditions ...Condi
 
 	_, err = tx.Exec(q.Ctx, sql, args...)
 	if err != nil {
-		return fmt.Errorf("could not update entry status: %w", err)
+		return fmt.Errorf("could not update entry: %w", err)
 	}
 	return nil
 }
@@ -245,7 +270,7 @@ func (q *PgQueue[T]) SelectOne(
 func (q *PgQueue[T]) UpdateStatus(ctx context.Context, tx pgx.Tx, status string, conditions ...Condition) error {
 	query := psql.Update(
 		um.Table(q.queueTable()),
-		um.SetCol("meta").To(psql.Raw("jsonb_set(meta, '{status}', to_jsonb(?::text), true)", status)),
+		um.SetCol("status").ToArg(status),
 		um.SetCol("updated_at").To(psql.Raw("NOW()")),
 	)
 

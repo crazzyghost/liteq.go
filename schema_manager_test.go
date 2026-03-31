@@ -26,7 +26,9 @@ func TestSchemaManager_RenderMigration_QualifiedQueue(t *testing.T) {
 	for _, want := range []string{
 		"CREATE TABLE IF NOT EXISTS liteq.queue_tasks",
 		"data JSONB",
-		"meta JSONB",
+		"status TEXT NOT NULL DEFAULT 'PENDING'",
+		"is_retry BOOLEAN NOT NULL DEFAULT false",
+		"retry_policy JSONB",
 	} {
 		if !strings.Contains(sql, want) {
 			t.Fatalf("rendered SQL missing %q in:\n%s", want, sql)

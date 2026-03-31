@@ -12,18 +12,16 @@ import (
 func newTestTask(id string) Task {
 	return Task{
 		BaseQueueEntry: BaseQueueEntry{
-			Id:   id,
-			Data: map[string]any{"key": "value"},
-			Meta: BaseQueueEntryMetaData{
-				Status:  string(PENDING),
-				IsRetry: false,
-				Retries: 0,
-				RetryPolicy: &RetryPolicy{
-					Strategy:     StrategyExponential,
-					MaxRetries:   3,
-					RetryDelayMs: 100,
-					MaxDelayMs:   10000,
-				},
+			Id:      id,
+			Data:    map[string]any{"key": "value"},
+			Status:  string(PENDING),
+			IsRetry: false,
+			Retries: 0,
+			RetryPolicy: &RetryPolicy{
+				Strategy:     StrategyExponential,
+				MaxRetries:   3,
+				RetryDelayMs: 100,
+				MaxDelayMs:   10000,
 			},
 		},
 	}
@@ -65,7 +63,7 @@ func newTestWorker(t *testing.T) *Worker {
 		MaxConcurrency:  2,
 		TaskTimeout:     100 * time.Millisecond,
 		GetTaskRetryPolicy: func(task Task) (*RetryPolicy, error) {
-			return task.Meta.RetryPolicy, nil
+			return task.RetryPolicy, nil
 		},
 	})
 	if err != nil {
@@ -78,11 +76,3 @@ func newTestWorker(t *testing.T) *Worker {
 type fakeConsumer struct{ err error }
 
 func (f *fakeConsumer) Consume(_ context.Context, _ Task) error { return f.err }
-
-// blockingConsumer blocks until its context is cancelled.
-type blockingConsumer struct{}
-
-func (blockingConsumer) Consume(ctx context.Context, _ Task) error {
-	<-ctx.Done()
-	return ctx.Err()
-}

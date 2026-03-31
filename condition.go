@@ -43,7 +43,7 @@ const (
 )
 
 type Condition struct {
-	Field    string            // e.g., "data", "meta", "id", "deleted_at"
+	Field    string            // e.g., "data", "id", "status", "deleted_at"
 	Keys     []string          // JSON path segments, e.g. ["config", "settings", "theme"]
 	JsonText bool              // If true, last key uses ->> (text extraction); if false, uses -> (JSON)
 	Operator ConditionOperator // The comparison operator
@@ -81,55 +81,29 @@ func NewJSONPathCondition(field string, keys []string, op ConditionOperator, val
 func DataCondition(key string, op ConditionOperator, value any) Condition {
 	return NewJSONCondition("data", key, op, value)
 }
-func MetaCondition(key string, op ConditionOperator, value any) Condition {
-	return NewJSONCondition("meta", key, op, value)
-}
 
 func DataPathCondition(keys []string, op ConditionOperator, value any) Condition {
 	return NewJSONPathCondition("data", keys, op, value, false)
-}
-func MetaPathCondition(keys []string, op ConditionOperator, value any) Condition {
-	return NewJSONPathCondition("meta", keys, op, value, false)
 }
 
 func DataJsonCondition(keys []string, op ConditionOperator, value any) Condition {
 	return NewJSONPathCondition("data", keys, op, value, true)
 }
 
-func MetaJsonCondition(keys []string, op ConditionOperator, value any) Condition {
-	return NewJSONPathCondition("meta", keys, op, value, true)
-}
-
 func DataEquals(key string, value any) Condition {
 	return DataCondition(key, OpEqual, value)
-}
-
-func MetaEquals(key string, value any) Condition {
-	return MetaCondition(key, OpEqual, value)
 }
 
 func DataNotEquals(key string, value any) Condition {
 	return DataCondition(key, OpNotEqual, value)
 }
 
-func MetaNotEquals(key string, value any) Condition {
-	return MetaCondition(key, OpNotEqual, value)
-}
-
 func DataIsNotNull(key string) Condition {
 	return DataCondition(key, OpIsNotNull, nil)
 }
 
-func MetaIsNotNull(key string) Condition {
-	return MetaCondition(key, OpIsNotNull, nil)
-}
-
 func DataIsNull(key string) Condition {
 	return DataCondition(key, OpIsNull, nil)
-}
-
-func MetaIsNull(key string) Condition {
-	return MetaCondition(key, OpIsNull, nil)
 }
 
 func ColumnEquals(column string, value any) Condition {
@@ -137,7 +111,7 @@ func ColumnEquals(column string, value any) Condition {
 }
 
 func StatusEquals(status string) Condition {
-	return MetaEquals("status", status)
+	return ColumnEquals("status", status)
 }
 
 func DeletedAtIsNull() Condition {
@@ -170,6 +144,7 @@ type UpdateMod = bob.Mod[*dialect.UpdateQuery]
 type SelectQuery interface {
 	Apply(mods ...SelectMod)
 }
+
 type UpdateQuery interface {
 	Apply(mods ...UpdateMod)
 }

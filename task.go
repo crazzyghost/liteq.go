@@ -20,5 +20,5 @@ func (t *Task) GetBaseQueueEntry() *BaseQueueEntry {
 }
 
 func (t *Task) WillExceedMaxRetries(maxRetries int) bool {
-	return (t.Meta.Retries + 1) > maxRetries
+	return (t.Retries + 1) > maxRetries
 }
