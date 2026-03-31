@@ -10,6 +10,8 @@ const (
 	StrategyFixed       = "fixed"
 	StrategyExponential = "exponential"
 	StrategyLinear      = "linear"
+
+	defaultSchema = "liteq"
 )
 
 // ParseRetryStrategy validates and normalises a retry strategy string.
@@ -42,9 +44,14 @@ type ScheduleConfig struct {
 
 type BaseQueue struct {
 	Ctx         context.Context
+	Schema      string
 	QueueName   string
 	RetryPolicy *RetryPolicy
 	TxTimeout   time.Duration // default 5s; applied to every transaction begin
+}
+
+func (q BaseQueue) QualifiedQueueName() string {
+	return qualifyIdentifier(q.Schema, q.QueueName)
 }
 
 type BaseQueueEntryData interface{}
@@ -77,4 +84,38 @@ type IQueueEntry interface {
 
 func (e *BaseQueueEntry) GetBaseQueueEntry() *BaseQueueEntry {
 	return e
+}
+
+type pgQueueConfig struct {
+	schema      string
+	autoMigrate bool
+	dlqName     string
+}
+
+type PgQueueOption func(*pgQueueConfig)
+
+func WithSchema(schema string) PgQueueOption {
+	return func(c *pgQueueConfig) {
+		c.schema = schema
+	}
+}
+
+func WithAutoMigrate() PgQueueOption {
+	return func(c *pgQueueConfig) {
+		c.autoMigrate = true
+	}
+}
+
+// WithDLQName overrides the DLQ table name used by WithAutoMigrate.
+// When unset, liteq derives "<queue>_dead_letter" for non-DLQ queues.
+func WithDLQName(name string) PgQueueOption {
+	return func(c *pgQueueConfig) {
+		c.dlqName = name
+	}
+}
+
+func newPgQueueConfig() pgQueueConfig {
+	return pgQueueConfig{
+		schema: defaultSchema,
+	}
 }

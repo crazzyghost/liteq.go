@@ -138,6 +138,51 @@ func TestNewPgQueue_DefaultTxTimeout(t *testing.T) {
 	}
 }
 
+func TestNewPgQueue_DefaultSchema(t *testing.T) {
+	q := newFakePgQueue(t, "queue_tasks")
+	got, err := NewPgQueue[Task](context.Background(), q.Pool, "queue_tasks", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Schema != defaultSchema {
+		t.Fatalf("Schema = %q, want %q", got.Schema, defaultSchema)
+	}
+	if got.QualifiedQueueName() != "liteq.queue_tasks" {
+		t.Fatalf("QualifiedQueueName() = %q, want %q", got.QualifiedQueueName(), "liteq.queue_tasks")
+	}
+}
+
+func TestNewPgQueue_WithSchemaOptOut(t *testing.T) {
+	q := newFakePgQueue(t, "queue_tasks")
+	got, err := NewPgQueue[Task](context.Background(), q.Pool, "queue_tasks", nil, WithSchema(""))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Schema != "" {
+		t.Fatalf("Schema = %q, want empty string", got.Schema)
+	}
+	if got.QualifiedQueueName() != "queue_tasks" {
+		t.Fatalf("QualifiedQueueName() = %q, want %q", got.QualifiedQueueName(), "queue_tasks")
+	}
+}
+
+func TestNewPgQueue_InvalidSchema(t *testing.T) {
+	q := newFakePgQueue(t, "queue_tasks")
+	_, err := NewPgQueue[Task](context.Background(), q.Pool, "queue_tasks", nil, WithSchema("bad-schema"))
+	if err == nil {
+		t.Fatal("expected error for invalid schema")
+	}
+}
+
+func TestDefaultDeadLetterQueueName(t *testing.T) {
+	if got := defaultDeadLetterQueueName("queue_tasks"); got != "queue_tasks_dead_letter" {
+		t.Fatalf("defaultDeadLetterQueueName(queue_tasks) = %q", got)
+	}
+	if got := defaultDeadLetterQueueName("queue_tasks_dead_letter"); got != "" {
+		t.Fatalf("defaultDeadLetterQueueName(queue_tasks_dead_letter) = %q, want empty string", got)
+	}
+}
+
 // ---- GetRetryPolicy (static / in-memory) ----
 
 func TestGetRetryPolicy_StaticPolicy(t *testing.T) {
