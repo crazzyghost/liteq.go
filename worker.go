@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math"
 	"math/rand/v2"
 	"runtime"
@@ -23,6 +22,7 @@ type WorkerConfig struct {
 	GetTaskRetryPolicy TaskRetryPolicySelector
 	MaxConcurrency     int           // default: runtime.NumCPU()
 	TaskTimeout        time.Duration // default: 30s
+	Hooks              Hooks         // default: BaseHooks{} (silent)
 }
 
 type Worker struct {
@@ -33,6 +33,7 @@ type Worker struct {
 	GetTaskRetryPolicy TaskRetryPolicySelector
 	MaxConcurrency     int
 	TaskTimeout        time.Duration
+	hooks              Hooks
 	done               chan struct{}
 	stopOnce           sync.Once
 }
@@ -58,6 +59,9 @@ func NewWorker(ctx context.Context, config WorkerConfig) (*Worker, error) {
 	if config.TaskTimeout == 0 {
 		config.TaskTimeout = 30 * time.Second
 	}
+	if config.Hooks == nil {
+		config.Hooks = BaseHooks{}
+	}
 
 	return &Worker{
 		Ctx:                ctx,
@@ -67,6 +71,7 @@ func NewWorker(ctx context.Context, config WorkerConfig) (*Worker, error) {
 		GetTaskRetryPolicy: config.GetTaskRetryPolicy,
 		MaxConcurrency:     config.MaxConcurrency,
 		TaskTimeout:        config.TaskTimeout,
+		hooks:              config.Hooks,
 		done:               make(chan struct{}),
 	}, nil
 }
@@ -88,28 +93,29 @@ func (w *Worker) Run(ctx context.Context, factory ConsumerFactory, interval time
 		case <-w.done:
 			return nil
 		case <-ticker.C:
-			if err := w.Work(ctx, factory); err != nil {
-				slog.Error("work batch error", slog.Any("error", err))
-			}
+			w.Work(ctx, factory) //nolint:errcheck
 		}
 	}
 }
 
-func (w *Worker) Poll() (tasks []Task, err error) {
+func (w *Worker) Poll(ctx context.Context) (tasks []Task, err error) {
 	tasks, err = w.TaskQueue.Dequeue(w.TaskBatchSize)
 	if err != nil {
 		return nil, err
 	}
+	safeHook(func() { w.hooks.OnDequeue(ctx, w.TaskQueue.QueueName, len(tasks)) })
 	return tasks, nil
 }
 
-func (w *Worker) HandleProcessed(task Task, status TaskStatus, tx pgx.Tx) (err error) {
+func (w *Worker) HandleProcessed(ctx context.Context, task Task, status TaskStatus, tx pgx.Tx, start time.Time) (err error) {
 	task.Meta.Status = string(status)
 
 	err = w.TaskQueue.UpdateQueueEntryMeta(task, tx)
 	if err != nil {
-		slog.Error("could not mark task as processed", "err", err)
 		return err
+	}
+	if status == COMPLETED {
+		safeHook(func() { w.hooks.OnTaskComplete(ctx, task.Id, time.Since(start)) })
 	}
 	return nil
 }
@@ -140,7 +146,7 @@ func (w *Worker) GetRetrySchedule(task *Task, retryPolicy *RetryPolicy) (time.Ti
 	return time.Now().Add(time.Duration(jitteredMs) * time.Millisecond), nil
 }
 
-func (w *Worker) Retry(task Task, tx pgx.Tx) (err error) {
+func (w *Worker) Retry(ctx context.Context, task Task, tx pgx.Tx) (err error) {
 	meta := task.Meta
 	retryPolicy, err := w.GetTaskRetryPolicy(task)
 	if err != nil {
@@ -148,12 +154,10 @@ func (w *Worker) Retry(task Task, tx pgx.Tx) (err error) {
 	}
 
 	if retryPolicy == nil {
-		slog.Warn("retry policy not configured; treating max retries as 0")
 		return &MaxRetriesExceededError{Retries: meta.Retries, MaxRetries: 0}
 	}
 
 	if task.WillExceedMaxRetries(retryPolicy.MaxRetries) {
-		slog.Error("task has exceeded max retries")
 		return &MaxRetriesExceededError{Retries: meta.Retries, MaxRetries: retryPolicy.MaxRetries}
 	}
 
@@ -169,24 +173,25 @@ func (w *Worker) Retry(task Task, tx pgx.Tx) (err error) {
 
 	err = w.TaskQueue.Enqueue(task, tx)
 	if err != nil {
-		slog.Error("could not add task to retry queue", slog.Any("error", err))
 		return err
 	}
 
+	safeHook(func() { w.hooks.OnEnqueue(ctx, w.TaskQueue.QueueName, task.Id) })
+	safeHook(func() { w.hooks.OnRetry(ctx, task.Id, task.Meta.Retries, nextRunAt) })
 	return nil
 }
 
-func (w *Worker) DlqEnqueue(task Task, tx pgx.Tx) (err error) {
+func (w *Worker) DlqEnqueue(ctx context.Context, task Task, tx pgx.Tx) (err error) {
 	task.Meta.Status = string(FAILED)
 	task.Meta.IsRetry = false
 	task.Meta.LastRunAt = task.Meta.NextRunAt
 	task.Meta.NextRunAt = nil
 	err = w.DeadLetterQueue.Enqueue(task, tx)
 	if err != nil {
-		slog.Error("could not push task to dead letter queue", "err", err)
 		return err
 	}
 
+	safeHook(func() { w.hooks.OnDLQ(ctx, task.Id, "task exceeded max retries or was non-transient") })
 	return nil
 }
 
@@ -203,7 +208,7 @@ func (w *Worker) dlqEnqueueWithRetry(ctx context.Context, task Task) error {
 			time.Sleep(delay)
 			continue
 		}
-		if err := w.DlqEnqueue(task, tx); err != nil {
+		if err := w.DlqEnqueue(ctx, task, tx); err != nil {
 			cancel()
 			rollback(tx)
 			lastErr = err
@@ -237,7 +242,9 @@ func (w *Worker) dlqEnqueueWithRetry(ctx context.Context, task Task) error {
 		return fmt.Errorf("dlq enqueue failed after %d retries and status update commit failed: %w",
 			len(delays), errors.Join(lastErr, err))
 	}
-	return fmt.Errorf("dlq enqueue failed after %d retries, marked DLQ_FAILED: %w", len(delays), lastErr)
+	dlqErr := fmt.Errorf("dlq enqueue failed after %d retries, marked DLQ_FAILED: %w", len(delays), lastErr)
+	safeHook(func() { w.hooks.OnDLQFailed(ctx, task.Id, dlqErr) })
+	return dlqErr
 }
 
 // HandleUnit runs the consumer for one task with a deadline, then commits the
@@ -246,6 +253,9 @@ func (w *Worker) dlqEnqueueWithRetry(ctx context.Context, task Task) error {
 func (w *Worker) HandleUnit(ctx context.Context, task Task, consumer Consumer) error {
 	taskCtx, cancel := context.WithTimeout(ctx, w.TaskTimeout)
 	defer cancel()
+
+	safeHook(func() { w.hooks.OnTaskStart(ctx, task.Id) })
+	start := time.Now()
 
 	done := make(chan error, 1)
 	go func() { done <- consumer.Consume(taskCtx, task) }()
@@ -267,11 +277,11 @@ func (w *Worker) HandleUnit(ctx context.Context, task Task, consumer Consumer) e
 	defer rollback(tx)
 
 	if consumerErr != nil {
-		if err := w.HandleFailure(ctx, task, consumerErr, tx); err != nil {
+		if err := w.HandleFailure(ctx, task, consumerErr, tx, start); err != nil {
 			return fmt.Errorf("could not handle task failure: %v", err)
 		}
 	} else {
-		if dbErr = w.HandleProcessed(task, COMPLETED, tx); dbErr != nil {
+		if dbErr = w.HandleProcessed(ctx, task, COMPLETED, tx, start); dbErr != nil {
 			return fmt.Errorf("could not mark task as completed: %w", dbErr)
 		}
 	}
@@ -283,8 +293,8 @@ func (w *Worker) HandleUnit(ctx context.Context, task Task, consumer Consumer) e
 	return nil
 }
 
-func (w *Worker) HandleFailure(ctx context.Context, task Task, failure error, tx pgx.Tx) error {
-	if err := w.HandleProcessed(task, FAILED, tx); err != nil {
+func (w *Worker) HandleFailure(ctx context.Context, task Task, failure error, tx pgx.Tx, start time.Time) error {
+	if err := w.HandleProcessed(ctx, task, FAILED, tx, start); err != nil {
 		return fmt.Errorf("could not mark task as failed: %w", err)
 	}
 
@@ -296,7 +306,7 @@ func (w *Worker) HandleFailure(ctx context.Context, task Task, failure error, tx
 		return nil
 	}
 
-	if err := w.Retry(task, tx); err != nil {
+	if err := w.Retry(ctx, task, tx); err != nil {
 		var maxRetriesExceed *MaxRetriesExceededError
 		if errors.As(err, &maxRetriesExceed) {
 			if queueError := w.dlqEnqueueWithRetry(ctx, task); queueError != nil {
@@ -314,7 +324,7 @@ func (w *Worker) HandleFailure(ctx context.Context, task Task, failure error, tx
 // All tasks complete regardless of individual failures; errors are aggregated
 // into a BatchError.
 func (w *Worker) Work(ctx context.Context, factory ConsumerFactory) error {
-	tasks, err := w.Poll()
+	tasks, err := w.Poll(ctx)
 	if err != nil {
 		return err
 	}
@@ -341,7 +351,6 @@ func (w *Worker) Work(ctx context.Context, factory ConsumerFactory) error {
 			defer wg.Done()
 			for t := range taskCh {
 				if err := w.HandleUnit(ctx, t, factory()); err != nil {
-					slog.Error("could not process task", slog.Any("error", err))
 					errsMu.Lock()
 					taskErrs = append(taskErrs, &TaskError{TaskID: t.Id, Err: err})
 					errsMu.Unlock()

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sync"
 	"time"
 
@@ -28,10 +27,7 @@ type PgQueue[T interface{}] struct {
 // rollback executes a transaction rollback, suppressing pgx.ErrTxClosed which
 // is expected after a successful Commit, and logging any other error.
 func rollback(tx pgx.Tx) {
-	err := tx.Rollback(context.Background())
-	if err != nil && !errors.Is(err, pgx.ErrTxClosed) {
-		slog.Error("unexpected rollback error", "error", err)
-	}
+	tx.Rollback(context.Background()) //nolint:errcheck
 }
 
 // beginTx creates a context-scoped transaction with the queue's TxTimeout.
@@ -318,7 +314,6 @@ func (q *PgQueue[T]) loadRetryPolicy(ctx context.Context) (*RetryPolicy, error) 
 	).Scan(&rawPolicy)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			slog.Warn("queue retry policy config not found; using zero-value fallback", "queueName", q.QueueName)
 			return &RetryPolicy{}, nil
 		}
 		return nil, fmt.Errorf("could not load queue retry policy for %s: %w", q.QueueName, err)
