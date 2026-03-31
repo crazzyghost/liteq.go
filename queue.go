@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 const (
@@ -46,6 +48,23 @@ type BaseQueue struct {
 
 func (q BaseQueue) QualifiedQueueName() string {
 	return qualifyIdentifier(q.Schema, q.QueueName)
+}
+
+// Queue defines the stable queue operations supported by liteq backends.
+//
+// The method set mirrors the current PgQueue API so callers can depend on an
+// interface without forcing a breaking rewrite of the package surface.
+type Queue[T any] interface {
+	Enqueue(item T, tx pgx.Tx) error
+	Dequeue(batchSize int) ([]T, error)
+	UpdateEntry(item T, tx pgx.Tx, conditions ...Condition) error
+	CheckCondition(ctx context.Context, tx pgx.Tx, conditions ...Condition) (bool, error)
+	Select(ctx context.Context, scan func(pgx.Rows) error, mods ...SelectMod) error
+	SelectOne(ctx context.Context, scan func(pgx.Rows) error, mods ...SelectMod) (bool, error)
+	UpdateStatus(ctx context.Context, tx pgx.Tx, status string, conditions ...Condition) error
+	GetRetryPolicy(ctx context.Context) (*RetryPolicy, error)
+	BeginTx(ctx context.Context) (pgx.Tx, context.Context, context.CancelFunc, error)
+	QueueLabel() string
 }
 
 type BaseQueueEntryData interface{}

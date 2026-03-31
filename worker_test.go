@@ -32,6 +32,38 @@ func TestNewWorker_NilDLQ(t *testing.T) {
 	}
 }
 
+func TestNewWorker_TypedNilQueue(t *testing.T) {
+	var q *PgQueue[Task]
+	dlq := &mockQueue{label: "queue_tasks_dead_letter"}
+
+	_, err := NewWorker(context.Background(), WorkerConfig{
+		TaskQueue:       q,
+		DeadLetterQueue: dlq,
+	})
+	if err == nil {
+		t.Error("expected error for typed nil TaskQueue")
+	}
+}
+
+func TestNewWorker_AcceptsQueueInterface(t *testing.T) {
+	q := &mockQueue{label: "queue_tasks"}
+	dlq := &mockQueue{label: "queue_tasks_dead_letter"}
+
+	w, err := NewWorker(context.Background(), WorkerConfig{
+		TaskQueue:       q,
+		DeadLetterQueue: dlq,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if w.TaskQueue.QueueLabel() != "queue_tasks" {
+		t.Errorf("TaskQueue label = %q, want queue_tasks", w.TaskQueue.QueueLabel())
+	}
+	if w.DeadLetterQueue.QueueLabel() != "queue_tasks_dead_letter" {
+		t.Errorf("DeadLetterQueue label = %q, want queue_tasks_dead_letter", w.DeadLetterQueue.QueueLabel())
+	}
+}
+
 func TestNewWorker_NegativeBatchSize(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
 	dlq := newFakePgQueue(t, "queue_tasks_dead_letter")

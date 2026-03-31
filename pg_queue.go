@@ -24,6 +24,8 @@ type PgQueue[T interface{}] struct {
 	retryPolicyErr  error
 }
 
+var _ Queue[Task] = (*PgQueue[Task])(nil)
+
 // rollback executes a transaction rollback, suppressing pgx.ErrTxClosed which
 // is expected after a successful Commit, and logging any other error.
 func rollback(tx pgx.Tx) {
@@ -48,6 +50,14 @@ func (q *PgQueue[T]) queueTable() string {
 
 func (q *PgQueue[T]) queueConfigsTable() string {
 	return qualifyIdentifier(q.Schema, "queue_configs")
+}
+
+func (q *PgQueue[T]) BeginTx(ctx context.Context) (pgx.Tx, context.Context, context.CancelFunc, error) {
+	return q.beginTx(ctx)
+}
+
+func (q *PgQueue[T]) QueueLabel() string {
+	return q.QueueName
 }
 
 func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {

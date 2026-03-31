@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"reflect"
 	"runtime"
 	"sync"
 	"time"
@@ -17,8 +18,8 @@ type TaskRetryPolicySelector func(task Task) (*RetryPolicy, error)
 
 type WorkerConfig struct {
 	TaskBatchSize      int
-	TaskQueue          *PgQueue[Task]
-	DeadLetterQueue    *PgQueue[Task]
+	TaskQueue          Queue[Task]
+	DeadLetterQueue    Queue[Task]
 	GetTaskRetryPolicy TaskRetryPolicySelector
 	MaxConcurrency     int           // default: runtime.NumCPU()
 	TaskTimeout        time.Duration // default: 30s
@@ -28,8 +29,8 @@ type WorkerConfig struct {
 type Worker struct {
 	Ctx                context.Context
 	TaskBatchSize      int
-	TaskQueue          *PgQueue[Task]
-	DeadLetterQueue    *PgQueue[Task]
+	TaskQueue          Queue[Task]
+	DeadLetterQueue    Queue[Task]
 	GetTaskRetryPolicy TaskRetryPolicySelector
 	MaxConcurrency     int
 	TaskTimeout        time.Duration
@@ -41,10 +42,10 @@ type Worker struct {
 // NewWorker validates config and constructs a Worker. A non-nil error is
 // returned when any required field is missing or has an invalid value.
 func NewWorker(ctx context.Context, config WorkerConfig) (*Worker, error) {
-	if config.TaskQueue == nil {
+	if isNilQueue(config.TaskQueue) {
 		return nil, fmt.Errorf("liteq: NewWorker: queue must not be nil")
 	}
-	if config.DeadLetterQueue == nil {
+	if isNilQueue(config.DeadLetterQueue) {
 		return nil, fmt.Errorf("liteq: NewWorker: dlq must not be nil")
 	}
 	if config.TaskBatchSize == 0 {
@@ -76,6 +77,20 @@ func NewWorker(ctx context.Context, config WorkerConfig) (*Worker, error) {
 	}, nil
 }
 
+func isNilQueue[T any](queue Queue[T]) bool {
+	if queue == nil {
+		return true
+	}
+
+	value := reflect.ValueOf(queue)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
 // Stop signals the worker to drain and exit. Safe to call multiple times.
 func (w *Worker) Stop() {
 	w.stopOnce.Do(func() { close(w.done) })
@@ -103,7 +118,7 @@ func (w *Worker) Poll(ctx context.Context) (tasks []Task, err error) {
 	if err != nil {
 		return nil, err
 	}
-	safeHook(func() { w.hooks.OnDequeue(ctx, w.TaskQueue.QueueName, len(tasks)) })
+	safeHook(func() { w.hooks.OnDequeue(ctx, w.TaskQueue.QueueLabel(), len(tasks)) })
 	return tasks, nil
 }
 
@@ -175,7 +190,7 @@ func (w *Worker) Retry(ctx context.Context, task Task, tx pgx.Tx) (err error) {
 		return err
 	}
 
-	safeHook(func() { w.hooks.OnEnqueue(ctx, w.TaskQueue.QueueName, task.Id) })
+	safeHook(func() { w.hooks.OnEnqueue(ctx, w.TaskQueue.QueueLabel(), task.Id) })
 	safeHook(func() { w.hooks.OnRetry(ctx, task.Id, task.Retries, nextRunAt) })
 	return nil
 }
@@ -201,7 +216,7 @@ func (w *Worker) dlqEnqueueWithRetry(ctx context.Context, task Task) error {
 	delays := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 300 * time.Millisecond}
 	var lastErr error
 	for _, delay := range delays {
-		tx, txCtx, cancel, err := w.DeadLetterQueue.beginTx(ctx)
+		tx, txCtx, cancel, err := w.DeadLetterQueue.BeginTx(ctx)
 		if err != nil {
 			lastErr = err
 			time.Sleep(delay)
@@ -226,7 +241,7 @@ func (w *Worker) dlqEnqueueWithRetry(ctx context.Context, task Task) error {
 	}
 
 	// Exhausted retries — mark task as DLQ_FAILED so it is not silently lost.
-	tx, txCtx, cancel, err := w.TaskQueue.beginTx(ctx)
+	tx, txCtx, cancel, err := w.TaskQueue.BeginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("dlq enqueue failed after %d retries and could not start status update: %w",
 			len(delays), errors.Join(lastErr, err))
@@ -268,7 +283,7 @@ func (w *Worker) HandleUnit(ctx context.Context, task Task, consumer Consumer) e
 			task.Id, w.TaskTimeout, taskCtx.Err())
 	}
 
-	tx, txCtx, txCancel, dbErr := w.TaskQueue.beginTx(ctx)
+	tx, txCtx, txCancel, dbErr := w.TaskQueue.BeginTx(ctx)
 	if dbErr != nil {
 		return fmt.Errorf("could not start transaction: %w", dbErr)
 	}
