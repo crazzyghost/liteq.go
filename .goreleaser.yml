@@ -1,0 +1,29 @@
+version: 2
+
+builds: []
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^ci:"
+      - "^test:"
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: "\U0001F680 Features"
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: "\U0001F41B Bug Fixes"
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: "\U0001F527 Maintenance"
+      regexp: '^.*?(chore|refactor|perf|style)(\(.+\))??!?:.+$'
+      order: 2
+
+release:
+  draft: false
+  prerelease: auto
+  name_template: "{{ .Tag }}"
