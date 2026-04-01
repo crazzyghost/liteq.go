@@ -57,3 +57,4 @@ go.sum.bak
 /temp
 
 .spec/
+liteq

@@ -13,7 +13,7 @@ import (
 func newTestTask(id string) Task {
 	return Task{
 		BaseQueueEntry: BaseQueueEntry{
-			Id:      id,
+			ID:      id,
 			Data:    map[string]any{"key": "value"},
 			Status:  string(PENDING),
 			IsRetry: false,
@@ -57,7 +57,7 @@ func newTestWorker(t *testing.T) *Worker {
 	t.Helper()
 	q := newFakePgQueue(t, "queue_tasks")
 	dlq := newFakePgQueue(t, "queue_tasks_dead_letter")
-	w, err := NewWorker(context.Background(), WorkerConfig{
+	w, err := NewWorker(context.Background(), &WorkerConfig{
 		TaskQueue:       q,
 		DeadLetterQueue: dlq,
 		TaskBatchSize:   5,
@@ -76,7 +76,7 @@ func newTestWorker(t *testing.T) *Worker {
 // fakeConsumer is a Consumer that returns a fixed error (or nil on success).
 type fakeConsumer struct{ err error }
 
-func (f *fakeConsumer) Consume(_ context.Context, _ Task) error { return f.err }
+func (f *fakeConsumer) Consume(_ context.Context, _ Task) error { return f.err } //nolint:gocritic // test mock, value receiver matches Consumer interface
 
 type mockQueue struct {
 	label            string
@@ -91,7 +91,7 @@ type mockQueue struct {
 	beginTxFn        func(context.Context) (pgx.Tx, context.Context, context.CancelFunc, error)
 }
 
-func (m *mockQueue) Enqueue(item Task, tx pgx.Tx) error {
+func (m *mockQueue) Enqueue(item Task, tx pgx.Tx) error { //nolint:gocritic // test mock, value matches Queue interface
 	if m.enqueueFn != nil {
 		return m.enqueueFn(item, tx)
 	}
@@ -105,7 +105,7 @@ func (m *mockQueue) Dequeue(batchSize int) ([]Task, error) {
 	return nil, nil
 }
 
-func (m *mockQueue) UpdateEntry(item Task, tx pgx.Tx, conditions ...Condition) error {
+func (m *mockQueue) UpdateEntry(item Task, tx pgx.Tx, conditions ...Condition) error { //nolint:gocritic // test mock, value matches Queue interface
 	if m.updateEntryFn != nil {
 		return m.updateEntryFn(item, tx, conditions...)
 	}

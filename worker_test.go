@@ -12,7 +12,7 @@ import (
 
 func TestNewWorker_NilQueue(t *testing.T) {
 	dlq := newFakePgQueue(t, "queue_tasks_dead_letter")
-	_, err := NewWorker(context.Background(), WorkerConfig{
+	_, err := NewWorker(context.Background(), &WorkerConfig{
 		TaskQueue:       nil,
 		DeadLetterQueue: dlq,
 	})
@@ -23,7 +23,7 @@ func TestNewWorker_NilQueue(t *testing.T) {
 
 func TestNewWorker_NilDLQ(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
-	_, err := NewWorker(context.Background(), WorkerConfig{
+	_, err := NewWorker(context.Background(), &WorkerConfig{
 		TaskQueue:       q,
 		DeadLetterQueue: nil,
 	})
@@ -36,7 +36,7 @@ func TestNewWorker_TypedNilQueue(t *testing.T) {
 	var q *PgQueue[Task]
 	dlq := &mockQueue{label: "queue_tasks_dead_letter"}
 
-	_, err := NewWorker(context.Background(), WorkerConfig{
+	_, err := NewWorker(context.Background(), &WorkerConfig{
 		TaskQueue:       q,
 		DeadLetterQueue: dlq,
 	})
@@ -49,7 +49,7 @@ func TestNewWorker_AcceptsQueueInterface(t *testing.T) {
 	q := &mockQueue{label: "queue_tasks"}
 	dlq := &mockQueue{label: "queue_tasks_dead_letter"}
 
-	w, err := NewWorker(context.Background(), WorkerConfig{
+	w, err := NewWorker(context.Background(), &WorkerConfig{
 		TaskQueue:       q,
 		DeadLetterQueue: dlq,
 	})
@@ -67,7 +67,7 @@ func TestNewWorker_AcceptsQueueInterface(t *testing.T) {
 func TestNewWorker_NegativeBatchSize(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
 	dlq := newFakePgQueue(t, "queue_tasks_dead_letter")
-	_, err := NewWorker(context.Background(), WorkerConfig{
+	_, err := NewWorker(context.Background(), &WorkerConfig{
 		TaskQueue:       q,
 		DeadLetterQueue: dlq,
 		TaskBatchSize:   -1,
@@ -82,7 +82,7 @@ func TestNewWorker_DefaultBatchSize(t *testing.T) {
 	// newTestWorker sets BatchSize=5, but test the zero default path explicitly.
 	q := newFakePgQueue(t, "queue_tasks")
 	dlq := newFakePgQueue(t, "queue_tasks_dead_letter")
-	w2, err := NewWorker(context.Background(), WorkerConfig{
+	w2, err := NewWorker(context.Background(), &WorkerConfig{
 		TaskQueue:       q,
 		DeadLetterQueue: dlq,
 		// TaskBatchSize=0 → should default to 10
@@ -99,7 +99,7 @@ func TestNewWorker_DefaultBatchSize(t *testing.T) {
 func TestNewWorker_DefaultMaxConcurrency(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
 	dlq := newFakePgQueue(t, "queue_tasks_dead_letter")
-	w, err := NewWorker(context.Background(), WorkerConfig{
+	w, err := NewWorker(context.Background(), &WorkerConfig{
 		TaskQueue:       q,
 		DeadLetterQueue: dlq,
 		// MaxConcurrency=0 → should default to runtime.NumCPU()
@@ -115,7 +115,7 @@ func TestNewWorker_DefaultMaxConcurrency(t *testing.T) {
 func TestNewWorker_DefaultTaskTimeout(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
 	dlq := newFakePgQueue(t, "queue_tasks_dead_letter")
-	w, err := NewWorker(context.Background(), WorkerConfig{
+	w, err := NewWorker(context.Background(), &WorkerConfig{
 		TaskQueue:       q,
 		DeadLetterQueue: dlq,
 	})
@@ -130,7 +130,7 @@ func TestNewWorker_DefaultTaskTimeout(t *testing.T) {
 func TestNewWorker_DefaultHooks(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
 	dlq := newFakePgQueue(t, "queue_tasks_dead_letter")
-	w, err := NewWorker(context.Background(), WorkerConfig{
+	w, err := NewWorker(context.Background(), &WorkerConfig{
 		TaskQueue:       q,
 		DeadLetterQueue: dlq,
 	})
@@ -149,7 +149,7 @@ func TestNewWorker_CustomHooks(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
 	dlq := newFakePgQueue(t, "queue_tasks_dead_letter")
 	custom := SlogHooks{}
-	w, err := NewWorker(context.Background(), WorkerConfig{
+	w, err := NewWorker(context.Background(), &WorkerConfig{
 		TaskQueue:       q,
 		DeadLetterQueue: dlq,
 		Hooks:           custom,
@@ -211,7 +211,7 @@ func TestWorker_Run_CancelledCtx(t *testing.T) {
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, context.Canceled) {
-			t.Errorf("Run() on cancelled ctx = %v, want context.Canceled", err)
+			t.Errorf("Run() on canceled ctx = %v, want context.Canceled", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Error("Run() did not return after ctx cancel")
@@ -331,10 +331,10 @@ func TestGetRetrySchedule_LinearMaxDelayCap(t *testing.T) {
 func TestRetry_NilPolicy_ReturnsMaxRetriesExceeded(t *testing.T) {
 	w := newTestWorker(t)
 	// Override selector to return nil policy (meaning: no retries allowed).
-	w.GetTaskRetryPolicy = func(task Task) (*RetryPolicy, error) { return nil, nil }
+	w.GetTaskRetryPolicy = func(_ Task) (*RetryPolicy, error) { return nil, nil }
 
 	task := newTestTask("t1")
-	err := w.Retry(context.Background(), task, nil)
+	err := w.Retry(context.Background(), &task, nil)
 
 	var maxErr *MaxRetriesExceededError
 	if !errors.As(err, &maxErr) {
@@ -348,14 +348,14 @@ func TestRetry_NilPolicy_ReturnsMaxRetriesExceeded(t *testing.T) {
 func TestRetry_MaxRetriesExceeded(t *testing.T) {
 	w := newTestWorker(t)
 	// Policy allows 0 retries.
-	w.GetTaskRetryPolicy = func(task Task) (*RetryPolicy, error) {
+	w.GetTaskRetryPolicy = func(_ Task) (*RetryPolicy, error) {
 		return &RetryPolicy{Strategy: StrategyFixed, MaxRetries: 0, RetryDelayMs: 100, MaxDelayMs: 1000}, nil
 	}
 
 	task := newTestTask("t1")
 	task.Retries = 0 // WillExceedMaxRetries(0): (0+1) > 0 = true
 
-	err := w.Retry(context.Background(), task, nil)
+	err := w.Retry(context.Background(), &task, nil)
 
 	var maxErr *MaxRetriesExceededError
 	if !errors.As(err, &maxErr) {
@@ -365,12 +365,12 @@ func TestRetry_MaxRetriesExceeded(t *testing.T) {
 
 func TestRetry_PolicySelectorError(t *testing.T) {
 	w := newTestWorker(t)
-	w.GetTaskRetryPolicy = func(task Task) (*RetryPolicy, error) {
+	w.GetTaskRetryPolicy = func(_ Task) (*RetryPolicy, error) {
 		return nil, fmt.Errorf("policy store unavailable")
 	}
 
 	task := newTestTask("t1")
-	err := w.Retry(context.Background(), task, nil)
+	err := w.Retry(context.Background(), &task, nil)
 	if err == nil {
 		t.Error("expected error when policy selector fails")
 	}

@@ -1,3 +1,4 @@
+// Package main implements the liteq CLI for database migrations.
 package main
 
 import (
@@ -203,13 +204,13 @@ func parseQueueDefinitions(value string) ([]liteq.QueueDefinition, error) {
 	return queues, nil
 }
 
-func parseSteps(value string) (bool, int, error) {
+func parseSteps(value string) (all bool, steps int, err error) {
 	trimmed := strings.TrimSpace(value)
 	if strings.EqualFold(trimmed, "all") {
 		return true, 0, nil
 	}
 
-	steps, err := strconv.Atoi(trimmed)
+	steps, err = strconv.Atoi(trimmed)
 	if err != nil {
 		return false, 0, fmt.Errorf("invalid --steps value %q: must be a positive integer or 'all'", value)
 	}

@@ -9,7 +9,7 @@ import (
 	"github.com/stephenafamo/bob/dialect/psql/sm"
 )
 
-func buildSelectSQL(t *testing.T, c Condition) (string, []any) {
+func buildSelectSQL(t *testing.T, c Condition) (string, []any) { //nolint:gocritic // test helper, copying is acceptable
 	t.Helper()
 	q := psql.Select(sm.From("queue_tasks"))
 	c.ApplyToSelect(q)
@@ -20,7 +20,7 @@ func buildSelectSQL(t *testing.T, c Condition) (string, []any) {
 	return sql, args
 }
 
-func buildUpdateSQL(t *testing.T, c Condition) (string, []any) {
+func buildUpdateSQL(t *testing.T, c Condition) (string, []any) { //nolint:gocritic // test helper, copying is acceptable
 	t.Helper()
 	q := psql.Update()
 	c.ApplyToUpdate(q)
@@ -43,19 +43,19 @@ func TestNewCondition(t *testing.T) {
 
 func TestNewJSONCondition(t *testing.T) {
 	c := NewJSONCondition("data", "type", OpEqual, "email")
-	if c.Field != "data" || len(c.Keys) != 1 || c.Keys[0] != "type" || !c.JsonText {
+	if c.Field != "data" || len(c.Keys) != 1 || c.Keys[0] != "type" || !c.JSONText {
 		t.Fatalf("unexpected condition: %+v", c)
 	}
 }
 
 func TestNewJSONPathConditionVariants(t *testing.T) {
 	textCond := NewJSONPathCondition("data", []string{"retryPolicy", "strategy"}, OpEqual, "fixed", false)
-	if !textCond.JsonText {
+	if !textCond.JSONText {
 		t.Fatalf("expected text JSON path condition, got %+v", textCond)
 	}
 
 	jsonCond := NewJSONPathCondition("data", []string{"config"}, OpEqual, nil, true)
-	if jsonCond.JsonText {
+	if jsonCond.JSONText {
 		t.Fatalf("expected JSON object path condition, got %+v", jsonCond)
 	}
 }
@@ -100,12 +100,12 @@ func TestColumnHelpers(t *testing.T) {
 
 func TestDataPathHelpers(t *testing.T) {
 	pathCond := DataPathCondition([]string{"a", "b", "c"}, OpEqual, "v")
-	if pathCond.Field != "data" || len(pathCond.Keys) != 3 || !pathCond.JsonText {
+	if pathCond.Field != "data" || len(pathCond.Keys) != 3 || !pathCond.JSONText {
 		t.Fatalf("unexpected data path condition: %+v", pathCond)
 	}
 
-	jsonCond := DataJsonCondition([]string{"config"}, OpIsNotNull, nil)
-	if jsonCond.Field != "data" || jsonCond.JsonText {
+	jsonCond := DataJSONCondition([]string{"config"}, OpIsNotNull, nil)
+	if jsonCond.Field != "data" || jsonCond.JSONText {
 		t.Fatalf("unexpected data JSON condition: %+v", jsonCond)
 	}
 }
@@ -138,7 +138,7 @@ func TestApplyToSelect_JSONPathText(t *testing.T) {
 }
 
 func TestApplyToSelect_JSONPathJSON(t *testing.T) {
-	sql, _ := buildSelectSQL(t, DataJsonCondition([]string{"retryPolicy"}, OpIsNotNull, nil))
+	sql, _ := buildSelectSQL(t, DataJSONCondition([]string{"retryPolicy"}, OpIsNotNull, nil))
 	if !strings.Contains(sql, `"data"->'retryPolicy'`) {
 		t.Fatalf("SQL should use -> for JSON object extraction, got: %s", sql)
 	}

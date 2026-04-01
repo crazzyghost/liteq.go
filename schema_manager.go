@@ -21,11 +21,13 @@ var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
 const maxRollbackSteps = int(^uint(0) >> 1)
 
+// QueueDefinition specifies a queue and its optional dead-letter queue for migrations.
 type QueueDefinition struct {
 	Name    string
 	DLQName string
 }
 
+// SchemaManager handles database migrations for liteq queue tables.
 type SchemaManager struct {
 	pool         *pgxpool.Pool
 	schema       string
@@ -39,14 +41,17 @@ type schemaManagerConfig struct {
 	dryRunWriter io.Writer
 }
 
+// SchemaManagerOption configures a SchemaManager at construction time.
 type SchemaManagerOption func(*schemaManagerConfig)
 
+// WithSchemaManagerSchema sets the target Postgres schema for migrations.
 func WithSchemaManagerSchema(schema string) SchemaManagerOption {
 	return func(c *schemaManagerConfig) {
 		c.schema = schema
 	}
 }
 
+// WithDryRun enables dry-run mode, writing SQL to w instead of executing it.
 func WithDryRun(w io.Writer) SchemaManagerOption {
 	return func(c *schemaManagerConfig) {
 		c.dryRun = true
@@ -57,6 +62,7 @@ func WithDryRun(w io.Writer) SchemaManagerOption {
 	}
 }
 
+// NewSchemaManager creates a SchemaManager with the given pool and options.
 func NewSchemaManager(pool *pgxpool.Pool, opts ...SchemaManagerOption) *SchemaManager {
 	cfg := schemaManagerConfig{
 		schema:       defaultSchema,
@@ -76,6 +82,7 @@ func NewSchemaManager(pool *pgxpool.Pool, opts ...SchemaManagerOption) *SchemaMa
 	}
 }
 
+// Migrate applies all pending up-migrations for the given queue definitions.
 func (sm *SchemaManager) Migrate(ctx context.Context, queues []QueueDefinition) error {
 	if err := sm.validate(ctx); err != nil {
 		return err
@@ -174,6 +181,7 @@ func (sm *SchemaManager) Migrate(ctx context.Context, queues []QueueDefinition) 
 	return nil
 }
 
+// MigrateDown rolls back the given number of migration batches.
 func (sm *SchemaManager) MigrateDown(ctx context.Context, steps int) error {
 	if err := sm.validate(ctx); err != nil {
 		return err
@@ -255,23 +263,27 @@ func (sm *SchemaManager) MigrateDown(ctx context.Context, steps int) error {
 	return nil
 }
 
+// MigrateDownAll rolls back all applied migration batches.
 func (sm *SchemaManager) MigrateDownAll(ctx context.Context) error {
 	return sm.MigrateDown(ctx, maxRollbackSteps)
 }
 
+// EnsureSchema applies only the foundation migration (schema + migrations table).
 func (sm *SchemaManager) EnsureSchema(ctx context.Context) error {
 	return sm.Migrate(ctx, nil)
 }
 
+// EnsureQueue applies migrations for a single queue and its optional DLQ.
 func (sm *SchemaManager) EnsureQueue(ctx context.Context, name, dlqName string) error {
 	return sm.Migrate(ctx, []QueueDefinition{{Name: name, DLQName: dlqName}})
 }
 
 func (sm *SchemaManager) migrationSteps(targets []string) []migrationStep {
 	foundationName, foundationVersion, _ := parseMigrationFile(migrationFoundation)
-	steps := []migrationStep{{
+	steps := make([]migrationStep, 0, 1+len(targets))
+	steps = append(steps, migrationStep{
 		file: migrationFoundation, name: foundationName, version: foundationVersion,
-	}}
+	})
 
 	queueName, queueVersion, _ := parseMigrationFile(migrationCreateQueue)
 	for _, target := range targets {
@@ -322,7 +334,7 @@ func (sm *SchemaManager) normalizeQueueTargets(queues []QueueDefinition) ([]stri
 	return targets, nil
 }
 
-func (sm *SchemaManager) renderMigration(file, queueName string) (string, bool, error) {
+func (sm *SchemaManager) renderMigration(file, queueName string) (sql string, skip bool, err error) {
 	raw, err := schemaFS.ReadFile(filepath.ToSlash(filepath.Join("schema", file)))
 	if err != nil {
 		return "", false, fmt.Errorf("read embedded SQL %s: %w", file, err)
@@ -346,13 +358,13 @@ func (sm *SchemaManager) renderMigration(file, queueName string) (string, bool, 
 }
 
 // loadAppliedMigrations returns a set of migration keys for dedup during Migrate.
-func (sm *SchemaManager) loadAppliedMigrations(ctx context.Context, tx pgx.Tx) (map[string]struct{}, bool, error) {
+func (sm *SchemaManager) loadAppliedMigrations(ctx context.Context, tx pgx.Tx) (applied map[string]struct{}, tableExists bool, err error) {
 	records, exists, err := sm.loadAppliedMigrationRecords(ctx, tx)
 	if err != nil {
 		return nil, false, err
 	}
 
-	applied := make(map[string]struct{}, len(records))
+	applied = make(map[string]struct{}, len(records))
 	for _, record := range records {
 		applied[record.migrationKey()] = struct{}{}
 	}
@@ -511,11 +523,12 @@ func (sm *SchemaManager) writeDryRunMigration(file, sql string) error {
 // "000_create_schema.v1.up.sql" → ("000_create_schema", "v1")
 func parseMigrationFile(file string) (name, version string, err error) {
 	base := file
-	if strings.HasSuffix(base, ".up.sql") {
+	switch {
+	case strings.HasSuffix(base, ".up.sql"):
 		base = strings.TrimSuffix(base, ".up.sql")
-	} else if strings.HasSuffix(base, ".down.sql") {
+	case strings.HasSuffix(base, ".down.sql"):
 		base = strings.TrimSuffix(base, ".down.sql")
-	} else {
+	default:
 		return "", "", fmt.Errorf("migration file %q has no recognized suffix", file)
 	}
 

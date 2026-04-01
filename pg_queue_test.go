@@ -44,7 +44,7 @@ func TestParseRetryStrategy(t *testing.T) {
 
 func TestNewPgQueue_NilCtx(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
-	_, err := NewPgQueue[Task](nil, q.Pool, "q", nil) //nolint:staticcheck
+	_, err := NewPgQueue[Task](nil, q.Pool, "q", nil) //nolint:staticcheck // deliberately testing nil ctx
 	if err == nil {
 		t.Error("expected error for nil ctx")
 	}
@@ -235,8 +235,8 @@ func TestTaskStatusValues(t *testing.T) {
 		{RUNNING, "RUNNING"},
 		{FAILED, "FAILED"},
 		{COMPLETED, "COMPLETED"},
-		{CANCELLED, "CANCELLED"},
-		{DLQ_FAILED, "DLQ_FAILED"},
+		{CANCELLED, "CANCELLED"}, //nolint:misspell // CANCELLED is the stored DB value
+		{DLQFailed, "DLQ_FAILED"},
 	}
 	for _, tc := range tests {
 		if string(tc.status) != tc.want {
@@ -253,8 +253,8 @@ func TestBaseQueueEntry_GetBaseQueueEntry(t *testing.T) {
 	if entry == nil {
 		t.Fatal("GetBaseQueueEntry() returned nil")
 	}
-	if entry.Id != "id-1" {
-		t.Errorf("entry.Id = %q, want %q", entry.Id, "id-1")
+	if entry.ID != "id-1" {
+		t.Errorf("entry.ID = %q, want %q", entry.ID, "id-1")
 	}
 }
 
@@ -273,13 +273,13 @@ func TestConsumerError_NonTransient_FlagSet(t *testing.T) {
 // ---- BaseQueueEntry.GetBaseQueueEntry (queue.go) ----
 
 func TestBaseQueueEntry_GetBaseQueueEntry_Direct(t *testing.T) {
-	entry := &BaseQueueEntry{Id: "direct-id"}
+	entry := &BaseQueueEntry{ID: "direct-id"}
 	got := entry.GetBaseQueueEntry()
 	if got == nil {
 		t.Fatal("GetBaseQueueEntry returned nil")
 	}
-	if got.Id != "direct-id" {
-		t.Errorf("Id = %q, want %q", got.Id, "direct-id")
+	if got.ID != "direct-id" {
+		t.Errorf("ID = %q, want %q", got.ID, "direct-id")
 	}
 	if got != entry {
 		t.Error("GetBaseQueueEntry should return the same pointer")

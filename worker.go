@@ -14,8 +14,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// TaskRetryPolicySelector resolves the retry policy for a given task.
+// Returning (nil, nil) indicates that no retries are allowed.
 type TaskRetryPolicySelector func(task Task) (*RetryPolicy, error)
 
+// WorkerConfig holds the configuration used to construct a Worker.
 type WorkerConfig struct {
 	TaskBatchSize      int
 	TaskQueue          Queue[Task]
@@ -26,6 +29,8 @@ type WorkerConfig struct {
 	Hooks              Hooks         // default: BaseHooks{} (silent)
 }
 
+// Worker dequeues tasks from a queue, processes them via a Consumer, and
+// handles retries and dead-letter enqueueing on failure.
 type Worker struct {
 	Ctx                context.Context
 	TaskBatchSize      int
@@ -41,7 +46,7 @@ type Worker struct {
 
 // NewWorker validates config and constructs a Worker. A non-nil error is
 // returned when any required field is missing or has an invalid value.
-func NewWorker(ctx context.Context, config WorkerConfig) (*Worker, error) {
+func NewWorker(ctx context.Context, config *WorkerConfig) (*Worker, error) {
 	if isNilQueue(config.TaskQueue) {
 		return nil, fmt.Errorf("liteq: NewWorker: queue must not be nil")
 	}
@@ -96,7 +101,7 @@ func (w *Worker) Stop() {
 	w.stopOnce.Do(func() { close(w.done) })
 }
 
-// Run polls in a loop until Stop() is called or ctx is cancelled.
+// Run polls in a loop until Stop() is called or ctx is canceled.
 // Errors from individual Work() batches are logged but do not abort the loop.
 func (w *Worker) Run(ctx context.Context, factory ConsumerFactory, interval time.Duration) error {
 	ticker := time.NewTicker(interval)
@@ -108,11 +113,12 @@ func (w *Worker) Run(ctx context.Context, factory ConsumerFactory, interval time
 		case <-w.done:
 			return nil
 		case <-ticker.C:
-			w.Work(ctx, factory) //nolint:errcheck
+			w.Work(ctx, factory) //nolint:errcheck,gosec // error intentionally ignored in poll loop
 		}
 	}
 }
 
+// Poll dequeues one batch of tasks from the task queue.
 func (w *Worker) Poll(ctx context.Context) (tasks []Task, err error) {
 	tasks, err = w.TaskQueue.Dequeue(w.TaskBatchSize)
 	if err != nil {
@@ -122,15 +128,16 @@ func (w *Worker) Poll(ctx context.Context) (tasks []Task, err error) {
 	return tasks, nil
 }
 
-func (w *Worker) HandleProcessed(ctx context.Context, task Task, status TaskStatus, tx pgx.Tx, start time.Time) (err error) {
+// HandleProcessed persists the task's new status and fires completion hooks.
+func (w *Worker) HandleProcessed(ctx context.Context, task *Task, status TaskStatus, tx pgx.Tx, start time.Time) (err error) {
 	task.Status = string(status)
 
-	err = w.TaskQueue.UpdateEntry(task, tx)
+	err = w.TaskQueue.UpdateEntry(*task, tx)
 	if err != nil {
 		return err
 	}
 	if status == COMPLETED {
-		safeHook(func() { w.hooks.OnTaskComplete(ctx, task.Id, time.Since(start)) })
+		safeHook(func() { w.hooks.OnTaskComplete(ctx, task.ID, time.Since(start)) })
 	}
 	return nil
 }
@@ -157,12 +164,13 @@ func (w *Worker) GetRetrySchedule(task *Task, retryPolicy *RetryPolicy) (time.Ti
 		delayMs = min(backoff, retryPolicy.MaxDelayMs)
 	}
 
-	jitteredMs := rand.IntN(delayMs + 1)
+	jitteredMs := rand.IntN(delayMs + 1) //nolint:gosec // jitter does not require cryptographic randomness
 	return time.Now().Add(time.Duration(jitteredMs) * time.Millisecond), nil
 }
 
-func (w *Worker) Retry(ctx context.Context, task Task, tx pgx.Tx) (err error) {
-	retryPolicy, err := w.GetTaskRetryPolicy(task)
+// Retry enqueues the task for another attempt according to its retry policy.
+func (w *Worker) Retry(ctx context.Context, task *Task, tx pgx.Tx) (err error) {
+	retryPolicy, err := w.GetTaskRetryPolicy(*task)
 	if err != nil {
 		return fmt.Errorf("could not resolve retry policy: %w", err)
 	}
@@ -175,44 +183,45 @@ func (w *Worker) Retry(ctx context.Context, task Task, tx pgx.Tx) (err error) {
 		return &MaxRetriesExceededError{Retries: task.Retries, MaxRetries: retryPolicy.MaxRetries}
 	}
 
-	nextRunAt, err := w.GetRetrySchedule(&task, retryPolicy)
+	nextRunAt, err := w.GetRetrySchedule(task, retryPolicy)
 	if err != nil {
 		return fmt.Errorf("could not compute retry schedule: %w", err)
 	}
 
 	task.IsRetry = true
-	task.Retries += 1
+	task.Retries++
 	task.NextRunAt = &nextRunAt
 	task.Status = "PENDING"
 
-	err = w.TaskQueue.Enqueue(task, tx)
+	err = w.TaskQueue.Enqueue(*task, tx)
 	if err != nil {
 		return err
 	}
 
-	safeHook(func() { w.hooks.OnEnqueue(ctx, w.TaskQueue.QueueLabel(), task.Id) })
-	safeHook(func() { w.hooks.OnRetry(ctx, task.Id, task.Retries, nextRunAt) })
+	safeHook(func() { w.hooks.OnEnqueue(ctx, w.TaskQueue.QueueLabel(), task.ID) })
+	safeHook(func() { w.hooks.OnRetry(ctx, task.ID, task.Retries, nextRunAt) })
 	return nil
 }
 
-func (w *Worker) DlqEnqueue(ctx context.Context, task Task, tx pgx.Tx) (err error) {
+// DlqEnqueue sends a failed task to the dead-letter queue within the given transaction.
+func (w *Worker) DlqEnqueue(ctx context.Context, task *Task, tx pgx.Tx) (err error) {
 	task.Status = string(FAILED)
 	task.IsRetry = false
 	task.LastRunAt = task.NextRunAt
 	task.NextRunAt = nil
-	err = w.DeadLetterQueue.Enqueue(task, tx)
+	err = w.DeadLetterQueue.Enqueue(*task, tx)
 	if err != nil {
 		return err
 	}
 
-	safeHook(func() { w.hooks.OnDLQ(ctx, task.Id, "task exceeded max retries or was non-transient") })
+	safeHook(func() { w.hooks.OnDLQ(ctx, task.ID, "task exceeded max retries or was non-transient") })
 	return nil
 }
 
 // dlqEnqueueWithRetry attempts to enqueue a task into the dead-letter queue
 // with up to 3 retries and linear backoff (100ms, 200ms, 300ms). On exhaustion,
-// the task is marked DLQ_FAILED in the task queue so it can be recovered manually.
-func (w *Worker) dlqEnqueueWithRetry(ctx context.Context, task Task) error {
+// the task is marked DLQFailed in the task queue so it can be recovered manually.
+func (w *Worker) dlqEnqueueWithRetry(ctx context.Context, task *Task) error {
 	delays := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 300 * time.Millisecond}
 	var lastErr error
 	for _, delay := range delays {
@@ -240,7 +249,7 @@ func (w *Worker) dlqEnqueueWithRetry(ctx context.Context, task Task) error {
 		return nil
 	}
 
-	// Exhausted retries — mark task as DLQ_FAILED so it is not silently lost.
+	// Exhausted retries — mark task as DLQFailed so it is not silently lost.
 	tx, txCtx, cancel, err := w.TaskQueue.BeginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("dlq enqueue failed after %d retries and could not start status update: %w",
@@ -248,7 +257,7 @@ func (w *Worker) dlqEnqueueWithRetry(ctx context.Context, task Task) error {
 	}
 	defer cancel()
 	defer rollback(tx)
-	if err := w.TaskQueue.UpdateStatus(ctx, tx, string(DLQ_FAILED), IDEquals(task.Id)); err != nil {
+	if err := w.TaskQueue.UpdateStatus(ctx, tx, string(DLQFailed), IDEquals(task.ID)); err != nil {
 		return fmt.Errorf("dlq enqueue failed after %d retries and status update failed: %w",
 			len(delays), errors.Join(lastErr, err))
 	}
@@ -256,23 +265,23 @@ func (w *Worker) dlqEnqueueWithRetry(ctx context.Context, task Task) error {
 		return fmt.Errorf("dlq enqueue failed after %d retries and status update commit failed: %w",
 			len(delays), errors.Join(lastErr, err))
 	}
-	dlqErr := fmt.Errorf("dlq enqueue failed after %d retries, marked DLQ_FAILED: %w", len(delays), lastErr)
-	safeHook(func() { w.hooks.OnDLQFailed(ctx, task.Id, dlqErr) })
+	dlqErr := fmt.Errorf("dlq enqueue failed after %d retries, marked DLQFailed: %w", len(delays), lastErr)
+	safeHook(func() { w.hooks.OnDLQFailed(ctx, task.ID, dlqErr) })
 	return dlqErr
 }
 
 // HandleUnit runs the consumer for one task with a deadline, then commits the
 // result (completed, retry, or DLQ) inside a transaction. A timeout is treated
 // as a transient failure and follows the normal retry path.
-func (w *Worker) HandleUnit(ctx context.Context, task Task, consumer Consumer) error {
+func (w *Worker) HandleUnit(ctx context.Context, task *Task, consumer Consumer) error {
 	taskCtx, cancel := context.WithTimeout(ctx, w.TaskTimeout)
 	defer cancel()
 
-	safeHook(func() { w.hooks.OnTaskStart(ctx, task.Id) })
+	safeHook(func() { w.hooks.OnTaskStart(ctx, task.ID) })
 	start := time.Now()
 
 	done := make(chan error, 1)
-	go func() { done <- consumer.Consume(taskCtx, task) }()
+	go func() { done <- consumer.Consume(taskCtx, *task) }()
 
 	var consumerErr error
 	select {
@@ -280,7 +289,7 @@ func (w *Worker) HandleUnit(ctx context.Context, task Task, consumer Consumer) e
 		consumerErr = err
 	case <-taskCtx.Done():
 		consumerErr = fmt.Errorf("task %s timed out after %s: %w",
-			task.Id, w.TaskTimeout, taskCtx.Err())
+			task.ID, w.TaskTimeout, taskCtx.Err())
 	}
 
 	tx, txCtx, txCancel, dbErr := w.TaskQueue.BeginTx(ctx)
@@ -307,7 +316,8 @@ func (w *Worker) HandleUnit(ctx context.Context, task Task, consumer Consumer) e
 	return nil
 }
 
-func (w *Worker) HandleFailure(ctx context.Context, task Task, failure error, tx pgx.Tx, start time.Time) error {
+// HandleFailure marks a task as failed and either retries or dead-letters it.
+func (w *Worker) HandleFailure(ctx context.Context, task *Task, failure error, tx pgx.Tx, start time.Time) error {
 	if err := w.HandleProcessed(ctx, task, FAILED, tx, start); err != nil {
 		return fmt.Errorf("could not mark task as failed: %w", err)
 	}
@@ -348,8 +358,8 @@ func (w *Worker) Work(ctx context.Context, factory ConsumerFactory) error {
 
 	numWorkers := min(w.MaxConcurrency, len(tasks))
 	taskCh := make(chan Task, len(tasks))
-	for _, t := range tasks {
-		taskCh <- t
+	for i := range tasks {
+		taskCh <- tasks[i]
 	}
 	close(taskCh)
 
@@ -364,9 +374,9 @@ func (w *Worker) Work(ctx context.Context, factory ConsumerFactory) error {
 		go func() {
 			defer wg.Done()
 			for t := range taskCh {
-				if err := w.HandleUnit(ctx, t, factory()); err != nil {
+				if err := w.HandleUnit(ctx, &t, factory()); err != nil {
 					errsMu.Lock()
-					taskErrs = append(taskErrs, &TaskError{TaskID: t.Id, Err: err})
+					taskErrs = append(taskErrs, &TaskError{TaskID: t.ID, Err: err})
 					errsMu.Unlock()
 				}
 			}

@@ -1,3 +1,4 @@
+// Package liteq provides a PostgreSQL-backed task queue with retry and dead-letter support.
 package liteq
 
 import (
@@ -11,8 +12,10 @@ import (
 	"github.com/stephenafamo/bob/dialect/psql/um"
 )
 
+// ConditionOperator represents a SQL comparison or logical operator.
 type ConditionOperator string
 
+// Supported SQL operators for use in Condition filters.
 const (
 	OpEqual       ConditionOperator = "="
 	OpNotEqual    ConditionOperator = "!="
@@ -38,18 +41,20 @@ const (
 	OpNotIRegexp  ConditionOperator = "!~*"
 	OpRegexp      ConditionOperator = "~"
 	OpNotRegexp   ConditionOperator = "!~"
-	OpJsonGet     ConditionOperator = "->"
-	OpJsonGetText ConditionOperator = "->>"
+	OpJSONGet     ConditionOperator = "->"
+	OpJSONGetText ConditionOperator = "->>"
 )
 
+// Condition describes a single WHERE-clause filter for queue task queries.
 type Condition struct {
 	Field    string            // e.g., "data", "id", "status", "deleted_at"
 	Keys     []string          // JSON path segments, e.g. ["config", "settings", "theme"]
-	JsonText bool              // If true, last key uses ->> (text extraction); if false, uses -> (JSON)
+	JSONText bool              // If true, last key uses ->> (text extraction); if false, uses -> (JSON)
 	Operator ConditionOperator // The comparison operator
 	Value    any               // nil for IS NULL/IS NOT NULL operators
 }
 
+// NewCondition creates a Condition for a plain column comparison.
 func NewCondition(field string, op ConditionOperator, value any) Condition {
 	return Condition{
 		Field:    field,
@@ -58,78 +63,91 @@ func NewCondition(field string, op ConditionOperator, value any) Condition {
 	}
 }
 
+// NewJSONCondition creates a Condition that extracts a single JSON key as text.
 func NewJSONCondition(field, key string, op ConditionOperator, value any) Condition {
 	return Condition{
 		Field:    field,
 		Keys:     []string{key},
-		JsonText: true,
+		JSONText: true,
 		Operator: op,
 		Value:    value,
 	}
 }
 
+// NewJSONPathCondition creates a Condition that traverses a multi-segment JSON path.
 func NewJSONPathCondition(field string, keys []string, op ConditionOperator, value any, jsonObj bool) Condition {
 	return Condition{
 		Field:    field,
 		Keys:     keys,
-		JsonText: !jsonObj,
+		JSONText: !jsonObj,
 		Operator: op,
 		Value:    value,
 	}
 }
 
+// DataCondition creates a Condition for a JSON text extraction on the data column.
 func DataCondition(key string, op ConditionOperator, value any) Condition {
 	return NewJSONCondition("data", key, op, value)
 }
 
+// DataPathCondition creates a Condition for a deep JSON text path on the data column.
 func DataPathCondition(keys []string, op ConditionOperator, value any) Condition {
 	return NewJSONPathCondition("data", keys, op, value, false)
 }
 
-func DataJsonCondition(keys []string, op ConditionOperator, value any) Condition {
+// DataJSONCondition creates a Condition for a JSON object path on the data column.
+func DataJSONCondition(keys []string, op ConditionOperator, value any) Condition {
 	return NewJSONPathCondition("data", keys, op, value, true)
 }
 
+// DataEquals creates a Condition that checks equality on a data JSON key.
 func DataEquals(key string, value any) Condition {
 	return DataCondition(key, OpEqual, value)
 }
 
+// DataNotEquals creates a Condition that checks inequality on a data JSON key.
 func DataNotEquals(key string, value any) Condition {
 	return DataCondition(key, OpNotEqual, value)
 }
 
+// DataIsNotNull creates a Condition that checks a data JSON key is not null.
 func DataIsNotNull(key string) Condition {
 	return DataCondition(key, OpIsNotNull, nil)
 }
 
+// DataIsNull creates a Condition that checks a data JSON key is null.
 func DataIsNull(key string) Condition {
 	return DataCondition(key, OpIsNull, nil)
 }
 
+// ColumnEquals creates a Condition that checks equality on a plain column.
 func ColumnEquals(column string, value any) Condition {
 	return NewCondition(column, OpEqual, value)
 }
 
+// StatusEquals creates a Condition that filters tasks by status.
 func StatusEquals(status string) Condition {
 	return ColumnEquals("status", status)
 }
 
+// DeletedAtIsNull creates a Condition that filters for non-deleted tasks.
 func DeletedAtIsNull() Condition {
 	return NewCondition("deleted_at", OpIsNull, nil)
 }
 
+// IDEquals creates a Condition that matches a task by its ID.
 func IDEquals(id any) Condition {
 	return ColumnEquals("id", id)
 }
 
-func (c Condition) getExpression() psql.Expression {
+func (c *Condition) getExpression() psql.Expression {
 	if len(c.Keys) == 0 {
 		return psql.Quote(c.Field)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, `"%s"`, c.Field)
 	for i, key := range c.Keys {
-		if i == len(c.Keys)-1 && c.JsonText {
+		if i == len(c.Keys)-1 && c.JSONText {
 			fmt.Fprintf(&b, `->>'%s'`, key)
 		} else {
 			fmt.Fprintf(&b, `->'%s'`, key)
@@ -138,18 +156,24 @@ func (c Condition) getExpression() psql.Expression {
 	return psql.Raw(b.String())
 }
 
+// SelectMod is a query modifier for PostgreSQL SELECT statements.
 type SelectMod = bob.Mod[*dialect.SelectQuery]
+
+// UpdateMod is a query modifier for PostgreSQL UPDATE statements.
 type UpdateMod = bob.Mod[*dialect.UpdateQuery]
 
+// SelectQuery is a SELECT query builder that accepts SelectMod modifiers.
 type SelectQuery interface {
 	Apply(mods ...SelectMod)
 }
 
+// UpdateQuery is an UPDATE query builder that accepts UpdateMod modifiers.
 type UpdateQuery interface {
 	Apply(mods ...UpdateMod)
 }
 
-func (c Condition) ApplyToSelect(query SelectQuery) {
+// ApplyToSelect adds this condition as a WHERE clause to a SELECT query.
+func (c *Condition) ApplyToSelect(query SelectQuery) {
 	expr := c.getExpression()
 
 	switch c.Operator {
@@ -180,7 +204,8 @@ func (c Condition) ApplyToSelect(query SelectQuery) {
 	}
 }
 
-func (c Condition) ApplyToUpdate(query UpdateQuery) {
+// ApplyToUpdate adds this condition as a WHERE clause to an UPDATE query.
+func (c *Condition) ApplyToUpdate(query UpdateQuery) {
 	expr := c.getExpression()
 
 	switch c.Operator {

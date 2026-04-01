@@ -16,6 +16,8 @@ import (
 	"github.com/stephenafamo/bob/dialect/psql/um"
 )
 
+// PgQueue is a PostgreSQL-backed queue that stores and retrieves entries
+// using pgxpool transactions.
 type PgQueue[T interface{}] struct {
 	BaseQueue
 	Pool            *pgxpool.Pool
@@ -29,7 +31,7 @@ var _ Queue[Task] = (*PgQueue[Task])(nil)
 // rollback executes a transaction rollback, suppressing pgx.ErrTxClosed which
 // is expected after a successful Commit, and logging any other error.
 func rollback(tx pgx.Tx) {
-	tx.Rollback(context.Background()) //nolint:errcheck
+	tx.Rollback(context.Background()) //nolint:errcheck,gosec // Rollback error is intentionally ignored; pgx.ErrTxClosed is expected after Commit
 }
 
 // beginTx creates a context-scoped transaction with the queue's TxTimeout.
@@ -52,14 +54,17 @@ func (q *PgQueue[T]) queueConfigsTable() string {
 	return qualifyIdentifier(q.Schema, "queue_configs")
 }
 
+// BeginTx starts a new transaction scoped to the queue's TxTimeout.
 func (q *PgQueue[T]) BeginTx(ctx context.Context) (pgx.Tx, context.Context, context.CancelFunc, error) {
 	return q.beginTx(ctx)
 }
 
+// QueueLabel returns the queue's table name for display/logging purposes.
 func (q *PgQueue[T]) QueueLabel() string {
 	return q.QueueName
 }
 
+// Enqueue inserts a queue entry into the queue table within the given transaction.
 func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
 	entry, ok := interface{}(&item).(IQueueEntry)
 	if !ok {
@@ -82,7 +87,7 @@ func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
 			"updated_at",
 		),
 		im.Values(psql.Arg(
-			entry.GetBaseQueueEntry().Id,
+			entry.GetBaseQueueEntry().ID,
 			entry.GetBaseQueueEntry().Data,
 			entry.GetBaseQueueEntry().Status,
 			entry.GetBaseQueueEntry().IsRetry,
@@ -109,6 +114,7 @@ func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
 	return nil
 }
 
+// Dequeue claims up to batchSize pending tasks atomically, setting them to RUNNING.
 func (q *PgQueue[T]) Dequeue(batchSize int) (tasks []T, err error) {
 	tx, txCtx, cancel, err := q.beginTx(q.Ctx)
 	if err != nil {
@@ -153,6 +159,7 @@ func (q *PgQueue[T]) Dequeue(batchSize int) (tasks []T, err error) {
 	return tasks, nil
 }
 
+// UpdateEntry persists changes to a queue entry within the given transaction.
 func (q *PgQueue[T]) UpdateEntry(item T, tx pgx.Tx, conditions ...Condition) error {
 	entry, ok := interface{}(&item).(IQueueEntry)
 	if !ok {
@@ -171,7 +178,8 @@ func (q *PgQueue[T]) UpdateEntry(item T, tx pgx.Tx, conditions ...Condition) err
 		um.SetCol("updated_at").To(psql.Raw("NOW()")),
 	)
 
-	IDEquals(entry.GetBaseQueueEntry().Id).ApplyToUpdate(query)
+	idCond := IDEquals(entry.GetBaseQueueEntry().ID)
+	idCond.ApplyToUpdate(query)
 
 	for _, cond := range conditions {
 		cond.ApplyToUpdate(query)
@@ -189,6 +197,7 @@ func (q *PgQueue[T]) UpdateEntry(item T, tx pgx.Tx, conditions ...Condition) err
 	return nil
 }
 
+// CheckCondition returns true when at least one row matches all conditions.
 func (q *PgQueue[T]) CheckCondition(ctx context.Context, tx pgx.Tx, conditions ...Condition) (bool, error) {
 	query := psql.Select(
 		sm.From(q.queueTable()),
@@ -277,6 +286,7 @@ func (q *PgQueue[T]) SelectOne(
 	return found, err
 }
 
+// UpdateStatus sets the status column for rows matching the given conditions.
 func (q *PgQueue[T]) UpdateStatus(ctx context.Context, tx pgx.Tx, status string, conditions ...Condition) error {
 	query := psql.Update(
 		um.Table(q.queueTable()),
@@ -350,8 +360,8 @@ func NewPgQueue[T interface{}](ctx context.Context, pool *pgxpool.Pool, queueNam
 	}
 
 	if cfg.autoMigrate {
-		sm := NewSchemaManager(pool, WithSchemaManagerSchema(cfg.schema))
-		if err := sm.EnsureQueue(ctx, queueName, cfg.dlqName); err != nil {
+		mgr := NewSchemaManager(pool, WithSchemaManagerSchema(cfg.schema))
+		if err := mgr.EnsureQueue(ctx, queueName, cfg.dlqName); err != nil {
 			return nil, fmt.Errorf("liteq: NewPgQueue: auto-migrate: %w", err)
 		}
 	}
@@ -368,6 +378,8 @@ func NewPgQueue[T interface{}](ctx context.Context, pool *pgxpool.Pool, queueNam
 	}, nil
 }
 
+// GetRetryPolicy returns the queue's retry policy, loading it from the database
+// on first access if no static policy was provided at construction time.
 func (q *PgQueue[T]) GetRetryPolicy(ctx context.Context) (*RetryPolicy, error) {
 	if q.RetryPolicy != nil {
 		return q.RetryPolicy, nil

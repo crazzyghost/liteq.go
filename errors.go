@@ -33,6 +33,7 @@ func (e *BatchError) Unwrap() []error {
 	return out
 }
 
+// MaxRetriesExceededError indicates a task has exceeded its maximum retry count.
 type MaxRetriesExceededError struct {
 	Retries    int
 	MaxRetries int
@@ -42,6 +43,7 @@ func (e *MaxRetriesExceededError) Error() string {
 	return fmt.Sprintf("max retries exceeded: %d/%d", e.Retries, e.MaxRetries)
 }
 
+// ConsumerError wraps an error returned by a Consumer with transience metadata.
 type ConsumerError struct {
 	Source         error
 	IsNonTransient bool

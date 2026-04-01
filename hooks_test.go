@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestBaseHooks_NoPanic(t *testing.T) {
+func TestBaseHooks_NoPanic(_ *testing.T) {
 	h := BaseHooks{}
 	ctx := context.Background()
 	now := time.Now()
@@ -109,12 +109,12 @@ func TestSlogHooks_OnDLQFailed(t *testing.T) {
 	}
 }
 
-func TestSlogHooks_ImplementsHooks(t *testing.T) {
+func TestSlogHooks_ImplementsHooks(_ *testing.T) {
 	// Compile-time assertion: SlogHooks satisfies the Hooks interface.
 	var _ Hooks = SlogHooks{}
 }
 
-func TestSlogHooks_EmbedBaseHooks(t *testing.T) {
+func TestSlogHooks_EmbedBaseHooks(_ *testing.T) {
 	// SlogHooks embeds BaseHooks; methods not overridden should not panic.
 	h := SlogHooks{Logger: slog.Default()}
 	_ = h // all methods are implemented; ensure no nil-pointer dereference

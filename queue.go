@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// Retry strategy constants define the back-off algorithms available for task retries.
 const (
 	StrategyFixed       = "fixed"
 	StrategyExponential = "exponential"
@@ -31,6 +32,7 @@ func ParseRetryStrategy(s string) (string, error) {
 	}
 }
 
+// RetryPolicy configures the back-off behavior for failed tasks.
 type RetryPolicy struct {
 	Strategy     string `json:"strategy"`
 	MaxRetries   int    `json:"maxRetries"`
@@ -38,6 +40,7 @@ type RetryPolicy struct {
 	MaxDelayMs   int    `json:"maxDelayMs"`
 }
 
+// BaseQueue holds the shared configuration for all queue implementations.
 type BaseQueue struct {
 	Ctx         context.Context
 	Schema      string
@@ -46,6 +49,7 @@ type BaseQueue struct {
 	TxTimeout   time.Duration // default 5s; applied to every transaction begin
 }
 
+// QualifiedQueueName returns the schema-qualified queue table name.
 func (q BaseQueue) QualifiedQueueName() string {
 	return qualifyIdentifier(q.Schema, q.QueueName)
 }
@@ -67,10 +71,12 @@ type Queue[T any] interface {
 	QueueLabel() string
 }
 
+// BaseQueueEntryData is the data payload stored in a queue entry.
 type BaseQueueEntryData interface{}
 
+// BaseQueueEntry represents a single row in a queue table.
 type BaseQueueEntry struct {
-	Id          string             `json:"id" db:"id"`
+	ID          string             `json:"id" db:"id"`
 	Data        BaseQueueEntryData `json:"data" db:"data"`
 	Status      string             `json:"status" db:"status"`
 	IsRetry     bool               `json:"isRetry" db:"is_retry"`
@@ -86,10 +92,12 @@ type BaseQueueEntry struct {
 	DeletedAt   *time.Time         `json:"deleted_at" db:"deleted_at"`
 }
 
+// IQueueEntry is implemented by types that embed a BaseQueueEntry.
 type IQueueEntry interface {
 	GetBaseQueueEntry() *BaseQueueEntry
 }
 
+// GetBaseQueueEntry returns the receiver itself, satisfying IQueueEntry.
 func (e *BaseQueueEntry) GetBaseQueueEntry() *BaseQueueEntry {
 	return e
 }
@@ -100,14 +108,17 @@ type pgQueueConfig struct {
 	dlqName     string
 }
 
+// PgQueueOption configures a PgQueue during construction.
 type PgQueueOption func(*pgQueueConfig)
 
+// WithSchema sets the PostgreSQL schema for queue tables.
 func WithSchema(schema string) PgQueueOption {
 	return func(c *pgQueueConfig) {
 		c.schema = schema
 	}
 }
 
+// WithAutoMigrate enables automatic schema migration on queue creation.
 func WithAutoMigrate() PgQueueOption {
 	return func(c *pgQueueConfig) {
 		c.autoMigrate = true
