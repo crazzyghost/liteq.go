@@ -29,6 +29,8 @@ func TestSchemaManager_RenderMigration_QualifiedQueue(t *testing.T) {
 		"status TEXT NOT NULL DEFAULT 'PENDING'",
 		"is_retry BOOLEAN NOT NULL DEFAULT false",
 		"retry_policy JSONB",
+		"CREATE INDEX IF NOT EXISTS idx_queue_tasks_created_at",
+		"CREATE INDEX IF NOT EXISTS idx_queue_tasks_dequeue",
 	} {
 		if !strings.Contains(sql, want) {
 			t.Fatalf("rendered SQL missing %q in:\n%s", want, sql)
@@ -36,33 +38,37 @@ func TestSchemaManager_RenderMigration_QualifiedQueue(t *testing.T) {
 	}
 }
 
-func TestSchemaManager_RenderMigration_UnqualifiedSchema(t *testing.T) {
-	sm := NewSchemaManager(nil, WithSchemaManagerSchema(""))
+func TestSchemaManager_RenderMigration_FoundationTables(t *testing.T) {
+	sm := NewSchemaManager(nil)
 
-	sql, skip, err := sm.renderMigration(migrationQueueConfigs, "")
+	sql, skip, err := sm.renderMigration(migrationFoundation, "")
 	if err != nil {
 		t.Fatalf("renderMigration returned error: %v", err)
 	}
 	if skip {
-		t.Fatal("renderMigration unexpectedly skipped queue_configs migration")
+		t.Fatal("renderMigration unexpectedly skipped foundation migration")
 	}
-	if strings.Contains(sql, "liteq.") {
-		t.Fatalf("expected unqualified SQL, got:\n%s", sql)
-	}
-	if !strings.Contains(sql, "CREATE TABLE IF NOT EXISTS queue_configs") {
-		t.Fatalf("expected queue_configs table in SQL, got:\n%s", sql)
+	for _, want := range []string{
+		"CREATE TABLE IF NOT EXISTS liteq.queue_configs",
+		"CREATE TABLE IF NOT EXISTS liteq.migrations",
+		"CREATE TABLE IF NOT EXISTS liteq.schema_versions",
+		"batch INTEGER NOT NULL",
+	} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("rendered SQL missing %q in:\n%s", want, sql)
+		}
 	}
 }
 
-func TestSchemaManager_RenderMigration_SkipsSchemaCreateWhenDisabled(t *testing.T) {
+func TestSchemaManager_RenderMigration_SkipsFoundationWhenSchemaEmpty(t *testing.T) {
 	sm := NewSchemaManager(nil, WithSchemaManagerSchema(""))
 
-	sql, skip, err := sm.renderMigration(migrationCreateSchema, "")
+	sql, skip, err := sm.renderMigration(migrationFoundation, "")
 	if err != nil {
 		t.Fatalf("renderMigration returned error: %v", err)
 	}
 	if !skip {
-		t.Fatal("expected create schema migration to be skipped")
+		t.Fatal("expected foundation migration to be skipped")
 	}
 	if sql != "" {
 		t.Fatalf("expected empty SQL when skipped, got %q", sql)
@@ -72,7 +78,7 @@ func TestSchemaManager_RenderMigration_SkipsSchemaCreateWhenDisabled(t *testing.
 func TestSchemaManager_RenderMigration_SkipsSchemaDropWhenDisabled(t *testing.T) {
 	sm := NewSchemaManager(nil, WithSchemaManagerSchema(""))
 
-	sql, skip, err := sm.renderMigration("001_create_schema.down.sql", "")
+	sql, skip, err := sm.renderMigration("000_create_schema.v1.down.sql", "")
 	if err != nil {
 		t.Fatalf("renderMigration returned error: %v", err)
 	}
@@ -84,20 +90,21 @@ func TestSchemaManager_RenderMigration_SkipsSchemaDropWhenDisabled(t *testing.T)
 	}
 }
 
-func TestSchemaManager_RenderMigration_QualifiedIndexDrop(t *testing.T) {
+func TestSchemaManager_RenderMigration_QualifiedQueueDrop(t *testing.T) {
 	sm := NewSchemaManager(nil)
 
-	sql, skip, err := sm.renderMigration("004_indexes.down.sql", "queue_tasks")
+	sql, skip, err := sm.renderMigration("001_create_queue_table.v1.down.sql", "queue_tasks")
 	if err != nil {
 		t.Fatalf("renderMigration returned error: %v", err)
 	}
 	if skip {
-		t.Fatal("renderMigration unexpectedly skipped index drop migration")
+		t.Fatal("renderMigration unexpectedly skipped queue drop migration")
 	}
 	for _, want := range []string{
 		"DROP INDEX IF EXISTS liteq.idx_queue_tasks_created_at;",
 		"DROP INDEX IF EXISTS liteq.idx_queue_tasks_deleted_at;",
 		"DROP INDEX IF EXISTS liteq.idx_queue_tasks_dequeue;",
+		"DROP TABLE IF EXISTS liteq.queue_tasks;",
 	} {
 		if !strings.Contains(sql, want) {
 			t.Fatalf("rendered SQL missing %q in:\n%s", want, sql)
@@ -118,14 +125,15 @@ func TestSchemaManager_MigrateDryRun_WritesSQLWithoutPool(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"-- Migration: 001_create_schema.up.sql",
+		"-- Migration: 000_create_schema.v1.up.sql",
 		"CREATE SCHEMA IF NOT EXISTS liteq;",
-		"-- Migration: 002_create_queue_table.up.sql",
+		"CREATE TABLE IF NOT EXISTS liteq.migrations",
+		"CREATE TABLE IF NOT EXISTS liteq.schema_versions",
+		"CREATE TABLE IF NOT EXISTS liteq.queue_configs",
+		"-- Migration: 001_create_queue_table.v1.up.sql",
 		"CREATE TABLE IF NOT EXISTS liteq.queue_tasks",
 		"CREATE TABLE IF NOT EXISTS liteq.queue_tasks_dead_letter",
-		"-- Migration: 004_indexes.up.sql",
 		"CREATE INDEX IF NOT EXISTS idx_queue_tasks_dequeue",
-		"-- Migration: 005_schema_versions.up.sql",
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("dry-run output missing %q in:\n%s", want, output.String())
@@ -153,52 +161,78 @@ func TestSchemaManager_MigrateDownAll_NilPool(t *testing.T) {
 	}
 }
 
-func TestDownMigrationFile(t *testing.T) {
-	file, err := downMigrationFile(migrationCreateIndexes)
-	if err != nil {
-		t.Fatalf("downMigrationFile returned error: %v", err)
+func TestParseMigrationFile(t *testing.T) {
+	tests := []struct {
+		file        string
+		wantName    string
+		wantVersion string
+		wantErr     bool
+	}{
+		{"000_create_schema.v1.up.sql", "000_create_schema", "v1", false},
+		{"001_create_queue_table.v1.up.sql", "001_create_queue_table", "v1", false},
+		{"001_create_queue_table.v2.down.sql", "001_create_queue_table", "v2", false},
+		{"no_suffix.sql", "", "", true},
+		{"no_version.up.sql", "", "", true},
 	}
-	if file != "004_indexes.down.sql" {
-		t.Fatalf("file = %q, want %q", file, "004_indexes.down.sql")
-	}
-}
-
-func TestSelectRollbackRecords_SkipsTrackingForPartialRollback(t *testing.T) {
-	applied := []versionRecord{
-		{Version: migrationSchemaVersions},
-		{Version: migrationCreateIndexes, QueueName: "tasks_dead_letter"},
-		{Version: migrationCreateIndexes, QueueName: "tasks"},
-		{Version: migrationQueueConfigs},
-		{Version: migrationCreateQueue, QueueName: "tasks_dead_letter"},
-		{Version: migrationCreateQueue, QueueName: "tasks"},
-		{Version: migrationCreateSchema},
-	}
-
-	got := selectRollbackRecords(applied, 1)
-	if len(got) != 1 {
-		t.Fatalf("rollback count = %d, want 1", len(got))
-	}
-	if got[0].Version != migrationCreateIndexes || got[0].QueueName != "tasks_dead_letter" {
-		t.Fatalf("got[0] = %#v", got[0])
+	for _, tt := range tests {
+		name, version, err := parseMigrationFile(tt.file)
+		if (err != nil) != tt.wantErr {
+			t.Fatalf("parseMigrationFile(%q) err = %v, wantErr = %v", tt.file, err, tt.wantErr)
+		}
+		if name != tt.wantName || version != tt.wantVersion {
+			t.Fatalf("parseMigrationFile(%q) = (%q, %q), want (%q, %q)", tt.file, name, version, tt.wantName, tt.wantVersion)
+		}
 	}
 }
 
-func TestSelectRollbackRecords_FullRollbackPreservesOrder(t *testing.T) {
-	applied := []versionRecord{
-		{Version: migrationSchemaVersions},
-		{Version: migrationCreateIndexes, QueueName: "tasks"},
-		{Version: migrationQueueConfigs},
+func TestMigrationRecord_DownFile(t *testing.T) {
+	r := migrationRecord{Name: "001_create_queue_table", Version: "v1"}
+	if got := r.downFile(); got != "001_create_queue_table.v1.down.sql" {
+		t.Fatalf("downFile() = %q, want %q", got, "001_create_queue_table.v1.down.sql")
+	}
+}
+
+func TestSelectRollbackBatches_PartialSkipsFoundation(t *testing.T) {
+	applied := []migrationRecord{
+		{Name: "001_create_queue_table", Version: "v1", QueueName: "tasks_dead_letter", Batch: 1},
+		{Name: "001_create_queue_table", Version: "v1", QueueName: "tasks", Batch: 1},
+		{Name: "000_create_schema", Version: "v1", QueueName: "", Batch: 1},
 	}
 
-	got := selectRollbackRecords(applied, 10)
+	got := selectRollbackBatches(applied, 1)
+	// Full rollback of the only batch includes everything.
 	if len(got) != 3 {
 		t.Fatalf("rollback count = %d, want 3", len(got))
 	}
-	if got[0].Version != migrationSchemaVersions {
-		t.Fatalf("first rollback = %#v, want schema_versions first (reverse-apply order)", got[0])
+	// Foundation should be last.
+	if got[2].Name != "000_create_schema" {
+		t.Fatalf("last = %#v, want foundation last", got[2])
 	}
-	if got[2].Version != migrationQueueConfigs {
-		t.Fatalf("last rollback = %#v, want queue_configs last", got[2])
+}
+
+func TestSelectRollbackBatches_MultipleBatches(t *testing.T) {
+	applied := []migrationRecord{
+		{Name: "001_create_queue_table", Version: "v1", QueueName: "events", Batch: 2},
+		{Name: "001_create_queue_table", Version: "v1", QueueName: "tasks", Batch: 1},
+		{Name: "000_create_schema", Version: "v1", QueueName: "", Batch: 1},
+	}
+
+	// Roll back 1 batch = batch 2 only (partial, foundation stays).
+	got := selectRollbackBatches(applied, 1)
+	if len(got) != 1 {
+		t.Fatalf("rollback count = %d, want 1", len(got))
+	}
+	if got[0].QueueName != "events" {
+		t.Fatalf("got[0] = %#v, want events queue", got[0])
+	}
+
+	// Roll back 2 batches = everything (foundation last).
+	got = selectRollbackBatches(applied, 2)
+	if len(got) != 3 {
+		t.Fatalf("rollback count = %d, want 3", len(got))
+	}
+	if got[2].Name != "000_create_schema" {
+		t.Fatalf("last = %#v, want foundation last", got[2])
 	}
 }
 

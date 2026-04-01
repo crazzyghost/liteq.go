@@ -13,11 +13,8 @@ import (
 )
 
 const (
-	migrationCreateSchema   = "001_create_schema.up.sql"
-	migrationCreateQueue    = "002_create_queue_table.up.sql"
-	migrationQueueConfigs   = "003_queue_configs.up.sql"
-	migrationCreateIndexes  = "004_indexes.up.sql"
-	migrationSchemaVersions = "005_schema_versions.up.sql"
+	migrationFoundation  = "000_create_schema.v1.up.sql"
+	migrationCreateQueue = "001_create_queue_table.v1.up.sql"
 )
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
@@ -103,16 +100,24 @@ func (sm *SchemaManager) Migrate(ctx context.Context, queues []QueueDefinition) 
 	}
 	defer rollback(tx)
 
-	applied, versionsExist, err := sm.loadAppliedVersions(ctx, tx)
+	applied, migrationsExist, err := sm.loadAppliedMigrations(ctx, tx)
 	if err != nil {
 		return err
 	}
 
-	pending := make([]versionRecord, 0, len(steps))
+	batch := 1
+	if migrationsExist {
+		batch, err = sm.nextBatch(ctx, tx)
+		if err != nil {
+			return err
+		}
+	}
+
+	pending := make([]migrationRecord, 0, len(steps))
 
 	for idx, step := range steps {
-		key := step.versionKey()
-		if versionsExist {
+		key := step.migrationKey()
+		if migrationsExist {
 			if _, ok := applied[key]; ok {
 				continue
 			}
@@ -130,9 +135,17 @@ func (sm *SchemaManager) Migrate(ctx context.Context, queues []QueueDefinition) 
 			return fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
 		}
 
-		record := versionRecord{Version: step.file, QueueName: step.queueName}
-		if versionsExist {
-			if err := sm.recordVersion(ctx, tx, record); err != nil {
+		record := migrationRecord{
+			Name:      step.name,
+			Version:   step.version,
+			QueueName: step.queueName,
+			Batch:     batch,
+		}
+		if migrationsExist {
+			if err := sm.recordMigration(ctx, tx, record); err != nil {
+				return fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
+			}
+			if err := sm.recordSchemaVersion(ctx, tx, record); err != nil {
 				return fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
 			}
 			applied[key] = struct{}{}
@@ -140,13 +153,16 @@ func (sm *SchemaManager) Migrate(ctx context.Context, queues []QueueDefinition) 
 		}
 
 		pending = append(pending, record)
-		if step.file == migrationSchemaVersions {
-			versionsExist = true
+		if step.file == migrationFoundation {
+			migrationsExist = true
 			for _, pendingRecord := range pending {
-				if err := sm.recordVersion(ctx, tx, pendingRecord); err != nil {
+				if err := sm.recordMigration(ctx, tx, pendingRecord); err != nil {
 					return fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
 				}
-				applied[pendingRecord.versionKey()] = struct{}{}
+				if err := sm.recordSchemaVersion(ctx, tx, pendingRecord); err != nil {
+					return fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
+				}
+				applied[pendingRecord.migrationKey()] = struct{}{}
 			}
 			pending = pending[:0]
 		}
@@ -167,7 +183,7 @@ func (sm *SchemaManager) MigrateDown(ctx context.Context, steps int) error {
 	}
 	if sm.pool == nil {
 		if sm.dryRun {
-			return fmt.Errorf("schema manager: pool must not be nil for migrate-down dry-run; applied migrations must be discovered from schema_versions")
+			return fmt.Errorf("schema manager: pool must not be nil for migrate-down dry-run; applied migrations must be discovered from the migrations table")
 		}
 		return fmt.Errorf("schema manager: pool must not be nil")
 	}
@@ -178,11 +194,11 @@ func (sm *SchemaManager) MigrateDown(ctx context.Context, steps int) error {
 	}
 	defer rollback(tx)
 
-	applied, versionsExist, err := sm.loadAppliedVersionRecords(ctx, tx)
+	records, migrationsExist, err := sm.loadAppliedMigrationRecords(ctx, tx)
 	if err != nil {
 		return err
 	}
-	if !versionsExist || len(applied) == 0 {
+	if !migrationsExist || len(records) == 0 {
 		if sm.dryRun {
 			return nil
 		}
@@ -192,13 +208,10 @@ func (sm *SchemaManager) MigrateDown(ctx context.Context, steps int) error {
 		return nil
 	}
 
-	plan := selectRollbackRecords(applied, steps)
-	versionsTableDropped := false
+	plan := selectRollbackBatches(records, steps)
+	migrationsTableDropped := false
 	for idx, record := range plan {
-		file, err := downMigrationFile(record.Version)
-		if err != nil {
-			return fmt.Errorf("schema manager: migration %s step %d: %w", record.Version, idx+1, err)
-		}
+		file := record.downFile()
 
 		sql, skip, err := sm.renderMigration(file, record.QueueName)
 		if err != nil {
@@ -218,14 +231,17 @@ func (sm *SchemaManager) MigrateDown(ctx context.Context, steps int) error {
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("schema manager: migration %s step %d: %w", file, idx+1, err)
 		}
-		if record.Version == migrationSchemaVersions {
-			versionsTableDropped = true
+		if record.Name == "000_create_schema" {
+			migrationsTableDropped = true
 			continue
 		}
-		if versionsTableDropped {
+		if migrationsTableDropped {
 			continue
 		}
-		if err := sm.deleteVersion(ctx, tx, record); err != nil {
+		if err := sm.deleteMigration(ctx, tx, record); err != nil {
+			return fmt.Errorf("schema manager: migration %s step %d: %w", file, idx+1, err)
+		}
+		if err := sm.deleteSchemaVersion(ctx, tx, record); err != nil {
 			return fmt.Errorf("schema manager: migration %s step %d: %w", file, idx+1, err)
 		}
 	}
@@ -252,15 +268,17 @@ func (sm *SchemaManager) EnsureQueue(ctx context.Context, name, dlqName string) 
 }
 
 func (sm *SchemaManager) migrationSteps(targets []string) []migrationStep {
-	steps := []migrationStep{{file: migrationCreateSchema}}
+	foundationName, foundationVersion, _ := parseMigrationFile(migrationFoundation)
+	steps := []migrationStep{{
+		file: migrationFoundation, name: foundationName, version: foundationVersion,
+	}}
+
+	queueName, queueVersion, _ := parseMigrationFile(migrationCreateQueue)
 	for _, target := range targets {
-		steps = append(steps, migrationStep{file: migrationCreateQueue, queueName: target})
+		steps = append(steps, migrationStep{
+			file: migrationCreateQueue, name: queueName, version: queueVersion, queueName: target,
+		})
 	}
-	steps = append(steps, migrationStep{file: migrationQueueConfigs})
-	for _, target := range targets {
-		steps = append(steps, migrationStep{file: migrationCreateIndexes, queueName: target})
-	}
-	steps = append(steps, migrationStep{file: migrationSchemaVersions})
 	return steps
 }
 
@@ -309,7 +327,7 @@ func (sm *SchemaManager) renderMigration(file, queueName string) (string, bool, 
 	if err != nil {
 		return "", false, fmt.Errorf("read embedded SQL %s: %w", file, err)
 	}
-	if sm.schema == "" && strings.HasPrefix(file, "001_create_schema.") {
+	if sm.schema == "" && strings.HasPrefix(file, "000_create_schema.") {
 		return "", true, nil
 	}
 
@@ -318,6 +336,7 @@ func (sm *SchemaManager) renderMigration(file, queueName string) (string, bool, 
 		"{{queue_name}}", queueName,
 		"{{qualified_queue_name}}", qualifyIdentifier(sm.schema, queueName),
 		"{{qualified_queue_configs_name}}", qualifyIdentifier(sm.schema, "queue_configs"),
+		"{{qualified_migrations_name}}", qualifyIdentifier(sm.schema, "migrations"),
 		"{{qualified_schema_versions_name}}", qualifyIdentifier(sm.schema, "schema_versions"),
 		"{{qualified_index_created_at_name}}", qualifyIdentifier(sm.schema, "idx_"+queueName+"_created_at"),
 		"{{qualified_index_deleted_at_name}}", qualifyIdentifier(sm.schema, "idx_"+queueName+"_deleted_at"),
@@ -326,76 +345,122 @@ func (sm *SchemaManager) renderMigration(file, queueName string) (string, bool, 
 	return replacer.Replace(string(raw)), false, nil
 }
 
-func (sm *SchemaManager) loadAppliedVersions(ctx context.Context, tx pgx.Tx) (map[string]struct{}, bool, error) {
-	records, exists, err := sm.loadAppliedVersionRecords(ctx, tx)
+// loadAppliedMigrations returns a set of migration keys for dedup during Migrate.
+func (sm *SchemaManager) loadAppliedMigrations(ctx context.Context, tx pgx.Tx) (map[string]struct{}, bool, error) {
+	records, exists, err := sm.loadAppliedMigrationRecords(ctx, tx)
 	if err != nil {
 		return nil, false, err
 	}
 
 	applied := make(map[string]struct{}, len(records))
 	for _, record := range records {
-		applied[record.versionKey()] = struct{}{}
+		applied[record.migrationKey()] = struct{}{}
 	}
 	return applied, exists, nil
 }
 
-func (sm *SchemaManager) loadAppliedVersionRecords(ctx context.Context, tx pgx.Tx) ([]versionRecord, bool, error) {
+// loadAppliedMigrationRecords reads all rows from the migrations table
+// ordered for rollback (highest batch first, then reverse name/queue order).
+func (sm *SchemaManager) loadAppliedMigrationRecords(ctx context.Context, tx pgx.Tx) ([]migrationRecord, bool, error) {
 	var relation *string
-	if err := tx.QueryRow(ctx, "SELECT to_regclass($1)", qualifyIdentifier(sm.schema, "schema_versions")).Scan(&relation); err != nil {
-		return nil, false, fmt.Errorf("schema manager: inspect schema_versions: %w", err)
+	if err := tx.QueryRow(ctx, "SELECT to_regclass($1)", qualifyIdentifier(sm.schema, "migrations")).Scan(&relation); err != nil {
+		return nil, false, fmt.Errorf("schema manager: inspect migrations: %w", err)
 	}
 	if relation == nil {
 		return nil, false, nil
 	}
 
 	rows, err := tx.Query(ctx, fmt.Sprintf(
-		"SELECT version, queue_name FROM %s ORDER BY applied_at DESC, version DESC, queue_name DESC",
-		qualifyIdentifier(sm.schema, "schema_versions"),
+		"SELECT name, version, queue_name, batch FROM %s ORDER BY batch DESC, name DESC, queue_name DESC",
+		qualifyIdentifier(sm.schema, "migrations"),
 	))
 	if err != nil {
-		return nil, false, fmt.Errorf("schema manager: load applied versions: %w", err)
+		return nil, false, fmt.Errorf("schema manager: load applied migrations: %w", err)
 	}
 	defer rows.Close()
 
-	records := make([]versionRecord, 0)
+	records := make([]migrationRecord, 0)
 	for rows.Next() {
-		var version, queueName string
-		if err := rows.Scan(&version, &queueName); err != nil {
-			return nil, false, fmt.Errorf("schema manager: scan applied version: %w", err)
+		var r migrationRecord
+		if err := rows.Scan(&r.Name, &r.Version, &r.QueueName, &r.Batch); err != nil {
+			return nil, false, fmt.Errorf("schema manager: scan applied migration: %w", err)
 		}
-		records = append(records, versionRecord{Version: version, QueueName: queueName})
+		records = append(records, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, false, fmt.Errorf("schema manager: iterate applied versions: %w", err)
+		return nil, false, fmt.Errorf("schema manager: iterate applied migrations: %w", err)
 	}
 
 	return records, true, nil
 }
 
-func (sm *SchemaManager) recordVersion(ctx context.Context, tx pgx.Tx, record versionRecord) error {
+func (sm *SchemaManager) nextBatch(ctx context.Context, tx pgx.Tx) (int, error) {
+	var maxBatch *int
+	err := tx.QueryRow(ctx, fmt.Sprintf(
+		"SELECT MAX(batch) FROM %s",
+		qualifyIdentifier(sm.schema, "migrations"),
+	)).Scan(&maxBatch)
+	if err != nil {
+		return 0, fmt.Errorf("schema manager: read max batch: %w", err)
+	}
+	if maxBatch == nil {
+		return 1, nil
+	}
+	return *maxBatch + 1, nil
+}
+
+func (sm *SchemaManager) recordMigration(ctx context.Context, tx pgx.Tx, record migrationRecord) error {
 	_, err := tx.Exec(
 		ctx,
-		fmt.Sprintf("INSERT INTO %s (version, queue_name) VALUES ($1, $2) ON CONFLICT (version, queue_name) DO NOTHING",
-			qualifyIdentifier(sm.schema, "schema_versions")),
-		record.Version,
-		record.QueueName,
+		fmt.Sprintf(
+			"INSERT INTO %s (name, version, queue_name, batch) VALUES ($1, $2, $3, $4) ON CONFLICT (name, version, queue_name) DO NOTHING",
+			qualifyIdentifier(sm.schema, "migrations"),
+		),
+		record.Name, record.Version, record.QueueName, record.Batch,
 	)
 	if err != nil {
-		return fmt.Errorf("record applied migration %s: %w", record.Version, err)
+		return fmt.Errorf("record migration %s.%s: %w", record.Name, record.Version, err)
 	}
 	return nil
 }
 
-func (sm *SchemaManager) deleteVersion(ctx context.Context, tx pgx.Tx, record versionRecord) error {
+func (sm *SchemaManager) recordSchemaVersion(ctx context.Context, tx pgx.Tx, record migrationRecord) error {
 	_, err := tx.Exec(
 		ctx,
-		fmt.Sprintf("DELETE FROM %s WHERE version = $1 AND queue_name = $2",
+		fmt.Sprintf(
+			"INSERT INTO %s (queue_name, version) VALUES ($1, $2) ON CONFLICT (queue_name) DO UPDATE SET version = EXCLUDED.version, applied_at = NOW()",
+			qualifyIdentifier(sm.schema, "schema_versions"),
+		),
+		record.QueueName, record.Version,
+	)
+	if err != nil {
+		return fmt.Errorf("record schema version %s for %q: %w", record.Version, record.QueueName, err)
+	}
+	return nil
+}
+
+func (sm *SchemaManager) deleteMigration(ctx context.Context, tx pgx.Tx, record migrationRecord) error {
+	_, err := tx.Exec(
+		ctx,
+		fmt.Sprintf("DELETE FROM %s WHERE name = $1 AND version = $2 AND queue_name = $3",
+			qualifyIdentifier(sm.schema, "migrations")),
+		record.Name, record.Version, record.QueueName,
+	)
+	if err != nil {
+		return fmt.Errorf("delete migration %s.%s: %w", record.Name, record.Version, err)
+	}
+	return nil
+}
+
+func (sm *SchemaManager) deleteSchemaVersion(ctx context.Context, tx pgx.Tx, record migrationRecord) error {
+	_, err := tx.Exec(
+		ctx,
+		fmt.Sprintf("DELETE FROM %s WHERE queue_name = $1",
 			qualifyIdentifier(sm.schema, "schema_versions")),
-		record.Version,
 		record.QueueName,
 	)
 	if err != nil {
-		return fmt.Errorf("delete applied migration %s: %w", record.Version, err)
+		return fmt.Errorf("delete schema version for %q: %w", record.QueueName, err)
 	}
 	return nil
 }
@@ -442,45 +507,82 @@ func (sm *SchemaManager) writeDryRunMigration(file, sql string) error {
 	return nil
 }
 
-func downMigrationFile(version string) (string, error) {
-	if !strings.HasSuffix(version, ".up.sql") {
-		return "", fmt.Errorf("migration %q does not have .up.sql suffix", version)
+// parseMigrationFile extracts the name and version from a migration filename.
+// "000_create_schema.v1.up.sql" → ("000_create_schema", "v1")
+func parseMigrationFile(file string) (name, version string, err error) {
+	base := file
+	if strings.HasSuffix(base, ".up.sql") {
+		base = strings.TrimSuffix(base, ".up.sql")
+	} else if strings.HasSuffix(base, ".down.sql") {
+		base = strings.TrimSuffix(base, ".down.sql")
+	} else {
+		return "", "", fmt.Errorf("migration file %q has no recognized suffix", file)
 	}
-	return strings.TrimSuffix(version, ".up.sql") + ".down.sql", nil
+
+	lastDot := strings.LastIndex(base, ".")
+	if lastDot < 0 {
+		return "", "", fmt.Errorf("migration file %q has no version segment", file)
+	}
+
+	name = base[:lastDot]
+	version = base[lastDot+1:]
+	if name == "" || version == "" {
+		return "", "", fmt.Errorf("migration file %q has empty name or version", file)
+	}
+
+	return name, version, nil
 }
 
-func selectRollbackRecords(applied []versionRecord, steps int) []versionRecord {
+// selectRollbackBatches selects migration records to roll back, grouped by batch.
+// steps is the number of batches to roll back. Records are returned in
+// reverse-apply order (highest batch first). The foundation migration
+// (000_create_schema) is only included in a full rollback.
+func selectRollbackBatches(applied []migrationRecord, steps int) []migrationRecord {
 	if steps <= 0 || len(applied) == 0 {
 		return nil
 	}
 
-	// Separate tracking (schema_versions) from non-tracking records,
-	// preserving the original reverse-apply order.
-	nonTracking := make([]versionRecord, 0, len(applied))
-	for _, record := range applied {
-		if record.Version != migrationSchemaVersions {
-			nonTracking = append(nonTracking, record)
+	// Collect distinct batches in descending order (applied is already sorted batch DESC).
+	seen := make(map[int]struct{})
+	batches := make([]int, 0)
+	for _, r := range applied {
+		if _, ok := seen[r.Batch]; !ok {
+			seen[r.Batch] = struct{}{}
+			batches = append(batches, r.Batch)
 		}
 	}
 
-	// Only tracking records exist.
-	if len(nonTracking) == 0 {
-		if steps > len(applied) {
-			steps = len(applied)
+	// Determine which batches to include.
+	batchCount := steps
+	if batchCount > len(batches) {
+		batchCount = len(batches)
+	}
+	rollbackBatches := make(map[int]struct{}, batchCount)
+	for _, b := range batches[:batchCount] {
+		rollbackBatches[b] = struct{}{}
+	}
+
+	// Separate foundation from non-foundation records.
+	var foundation []migrationRecord
+	nonFoundation := make([]migrationRecord, 0, len(applied))
+	for _, r := range applied {
+		if _, ok := rollbackBatches[r.Batch]; !ok {
+			continue
 		}
-		return append([]versionRecord(nil), applied[:steps]...)
+		if r.Name == "000_create_schema" {
+			foundation = append(foundation, r)
+		} else {
+			nonFoundation = append(nonFoundation, r)
+		}
 	}
 
-	// Partial rollback: only revert non-tracking records so the
-	// schema_versions table stays intact for future operations.
-	if steps < len(nonTracking) {
-		return append([]versionRecord(nil), nonTracking[:steps]...)
+	// Partial rollback: skip foundation so the migrations table stays intact.
+	if batchCount < len(batches) {
+		return nonFoundation
 	}
 
-	// Full rollback: return all records in their original reverse-apply
-	// order.  schema_versions was applied last so it appears first in the
-	// list and gets dropped before the objects it tracks.
-	return append([]versionRecord(nil), applied...)
+	// Full rollback: non-foundation first, then foundation last.
+	return append(nonFoundation, foundation...)
 }
 
 func defaultDeadLetterQueueName(name string) string {
@@ -512,18 +614,26 @@ func validateIdentifier(kind, value string) error {
 
 type migrationStep struct {
 	file      string
+	name      string
+	version   string
 	queueName string
 }
 
-func (m migrationStep) versionKey() string {
-	return versionRecord{Version: m.file, QueueName: m.queueName}.versionKey()
+func (m migrationStep) migrationKey() string {
+	return m.name + "|" + m.version + "|" + m.queueName
 }
 
-type versionRecord struct {
+type migrationRecord struct {
+	Name      string
 	Version   string
 	QueueName string
+	Batch     int
 }
 
-func (v versionRecord) versionKey() string {
-	return v.Version + "|" + v.QueueName
+func (r migrationRecord) migrationKey() string {
+	return r.Name + "|" + r.Version + "|" + r.QueueName
+}
+
+func (r migrationRecord) downFile() string {
+	return r.Name + "." + r.Version + ".down.sql"
 }
