@@ -9,7 +9,7 @@ test:
 	go test -race -coverprofile=coverage.out ./...
 
 build:
-	go build ./... -o ./build/liteq
+	go build ./... 
 
 fmt:
 	gofumpt -w .
