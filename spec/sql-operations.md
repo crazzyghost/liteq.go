@@ -42,7 +42,7 @@ deleted_at TIMESTAMPTZ
 | `update_entry` | Optional | Update lifecycle and retry fields for a row. |
 | `check_condition` | No | Check whether any row satisfies a predicate. |
 | `select` | No | Query rows with arbitrary filters, ordering, and limit. |
-| `get_retry_policy` | No | Fetch queue-level retry policy from `queue_configs`. |
+| `get_retry_policy` | No | Fetch queue-level retry policy from `queue_meta`. |
 
 ## 1. `enqueue`
 
@@ -220,7 +220,7 @@ SELECT id, data, status, is_retry, retries, retry_policy,
 
 ```sql
 SELECT retry_policy
-  FROM {schema}.queue_configs
+  FROM {schema}.queue_meta
  WHERE queue_name = $1   -- text
  LIMIT 1;
 ```

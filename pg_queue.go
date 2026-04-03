@@ -50,8 +50,8 @@ func (q *PgQueue[T]) queueTable() string {
 	return qualifyIdentifier(q.Schema, q.QueueName)
 }
 
-func (q *PgQueue[T]) queueConfigsTable() string {
-	return qualifyIdentifier(q.Schema, "queue_configs")
+func (q *PgQueue[T]) queueMetaTable() string {
+	return qualifyIdentifier(q.Schema, "queue_meta")
 }
 
 // BeginTx starts a new transaction scoped to the queue's TxTimeout.
@@ -394,7 +394,7 @@ func (q *PgQueue[T]) loadRetryPolicy(ctx context.Context) (*RetryPolicy, error) 
 	var rawPolicy []byte
 	err := q.Pool.QueryRow(
 		ctx,
-		fmt.Sprintf("SELECT retry_policy FROM %s WHERE queue_name = $1 LIMIT 1", q.queueConfigsTable()),
+		fmt.Sprintf("SELECT retry_policy FROM %s WHERE queue_name = $1 LIMIT 1", q.queueMetaTable()),
 		q.QueueName,
 	).Scan(&rawPolicy)
 	if err != nil {

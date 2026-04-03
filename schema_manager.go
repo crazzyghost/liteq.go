@@ -124,10 +124,9 @@ func (sm *SchemaManager) Migrate(ctx context.Context, queues []QueueDefinition) 
 
 	for idx, step := range steps {
 		key := step.migrationKey()
+		alreadyApplied := false
 		if migrationsExist {
-			if _, ok := applied[key]; ok {
-				continue
-			}
+			_, alreadyApplied = applied[key]
 		}
 
 		sql, skip, err := sm.renderMigration(step.file, step.queueName)
@@ -149,6 +148,9 @@ func (sm *SchemaManager) Migrate(ctx context.Context, queues []QueueDefinition) 
 			Batch:     batch,
 		}
 		if migrationsExist {
+			if alreadyApplied {
+				continue
+			}
 			if err := sm.recordMigration(ctx, tx, record); err != nil {
 				return fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
 			}
@@ -347,7 +349,8 @@ func (sm *SchemaManager) renderMigration(file, queueName string) (sql string, sk
 		"{{schema_name}}", sm.schema,
 		"{{queue_name}}", queueName,
 		"{{qualified_queue_name}}", qualifyIdentifier(sm.schema, queueName),
-		"{{qualified_queue_configs_name}}", qualifyIdentifier(sm.schema, "queue_configs"),
+		"{{qualified_queue_meta_name}}", qualifyIdentifier(sm.schema, "queue_meta"),
+		"{{qualified_queue_states_name}}", qualifyIdentifier(sm.schema, "queue_states"),
 		"{{qualified_migrations_name}}", qualifyIdentifier(sm.schema, "migrations"),
 		"{{qualified_schema_versions_name}}", qualifyIdentifier(sm.schema, "schema_versions"),
 		"{{qualified_index_created_at_name}}", qualifyIdentifier(sm.schema, "idx_"+queueName+"_created_at"),

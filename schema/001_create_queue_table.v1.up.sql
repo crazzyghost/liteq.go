@@ -24,3 +24,13 @@ CREATE INDEX IF NOT EXISTS idx_{{queue_name}}_deleted_at
 CREATE INDEX IF NOT EXISTS idx_{{queue_name}}_dequeue
     ON {{qualified_queue_name}} (status, is_retry, deleted_at, created_at)
     WHERE deleted_at IS NULL;
+
+WITH inserted_queue_meta AS (
+    INSERT INTO {{qualified_queue_meta_name}} (queue_name)
+    VALUES ('{{queue_name}}')
+    ON CONFLICT (queue_name) DO NOTHING
+    RETURNING queue_name
+)
+INSERT INTO {{qualified_queue_states_name}} (queue_name, state, reason)
+SELECT queue_name, 'active', 'queue created'
+FROM inserted_queue_meta;
