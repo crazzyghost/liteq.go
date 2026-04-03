@@ -1,4 +1,4 @@
-// Package main implements the liteq CLI for database migrations.
+// Package main implements the lq CLI for database migrations.
 package main
 
 import (
@@ -13,6 +13,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	liteq "liteq.go"
 )
+
+// version is the binary version, injected at build time via -X main.version=<tag>.
+var version = "dev"
 
 type schemaMigrator interface {
 	Migrate(context.Context, []liteq.QueueDefinition) error
@@ -30,6 +33,7 @@ var newPool = func(ctx context.Context, databaseURL string) (*pgxpool.Pool, erro
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)
 	}
+
 	return pool, nil
 }
 
@@ -46,8 +50,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		if stderr != nil {
 			_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
 		}
+
 		return 1
 	}
+
 	return 0
 }
 
@@ -55,6 +61,12 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	if len(args) == 0 {
 		printRootUsage(stderr)
 		return fmt.Errorf("command is required")
+	}
+
+	// Handle both the subcommand and flag forms before dispatching to subcommands.
+	if args[0] == "version" || args[0] == "--version" {
+		_, _ = fmt.Fprintf(stdout, "lq %s\n", version)
+		return nil
 	}
 
 	switch args[0] {
@@ -73,7 +85,7 @@ func runMigrateUp(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
 		if stderr != nil {
-			_, _ = fmt.Fprintln(stderr, "usage: liteq migrate-up [--database-url] [--schema] [--queues] [--dry-run]")
+			_, _ = fmt.Fprintln(stderr, "usage: lq migrate-up [--database-url] [--schema] [--queues] [--dry-run]")
 		}
 	}
 
@@ -81,9 +93,11 @@ func runMigrateUp(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	schemaFlag := fs.String("schema", "", "Target Postgres schema")
 	queuesFlag := fs.String("queues", "", "Comma-separated queue[:dlq] entries")
 	dryRunFlag := fs.Bool("dry-run", false, "Print SQL without executing")
+
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parse migrate-up flags: %w", err)
 	}
+
 	if len(fs.Args()) != 0 {
 		return fmt.Errorf("unexpected arguments for migrate-up: %s", strings.Join(fs.Args(), " "))
 	}
@@ -108,6 +122,7 @@ func runMigrateUp(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		if err != nil {
 			return err
 		}
+
 		if pool != nil {
 			defer pool.Close()
 		}
@@ -121,7 +136,7 @@ func runMigrateDown(ctx context.Context, args []string, stdout, stderr io.Writer
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
 		if stderr != nil {
-			_, _ = fmt.Fprintln(stderr, "usage: liteq migrate-down [--database-url] [--schema] [--steps] [--dry-run]")
+			_, _ = fmt.Fprintln(stderr, "usage: lq migrate-down [--database-url] [--schema] [--steps] [--dry-run]")
 		}
 	}
 
@@ -129,15 +144,18 @@ func runMigrateDown(ctx context.Context, args []string, stdout, stderr io.Writer
 	schemaFlag := fs.String("schema", "", "Target Postgres schema")
 	stepsFlag := fs.String("steps", "1", "Number of migrations to roll back, or 'all'")
 	dryRunFlag := fs.Bool("dry-run", false, "Print SQL without executing")
+
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parse migrate-down flags: %w", err)
 	}
+
 	if len(fs.Args()) != 0 {
 		return fmt.Errorf("unexpected arguments for migrate-down: %s", strings.Join(fs.Args(), " "))
 	}
 
 	databaseURL := firstNonEmpty(*databaseURLFlag, os.Getenv("DATABASE_URL"))
 	schema := firstNonEmpty(*schemaFlag, os.Getenv("LITEQ_SCHEMA"), "liteq")
+
 	rollbackAll, steps, err := parseSteps(*stepsFlag)
 	if err != nil {
 		return err
@@ -148,8 +166,10 @@ func runMigrateDown(ctx context.Context, args []string, stdout, stderr io.Writer
 		if *dryRunFlag {
 			return fmt.Errorf("migrate-down dry-run requires a database connection to inspect applied migrations: %w", err)
 		}
+
 		return err
 	}
+
 	if pool != nil {
 		defer pool.Close()
 	}
@@ -163,6 +183,7 @@ func runMigrateDown(ctx context.Context, args []string, stdout, stderr io.Writer
 	if rollbackAll {
 		return migrator.MigrateDownAll(ctx)
 	}
+
 	return migrator.MigrateDown(ctx, steps)
 }
 
@@ -170,10 +191,12 @@ func requirePool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error)
 	if strings.TrimSpace(databaseURL) == "" {
 		return nil, fmt.Errorf("database url is required; use --database-url or DATABASE_URL")
 	}
+
 	pool, err := newPool(ctx, databaseURL)
 	if err != nil {
 		return nil, err
 	}
+
 	return pool, nil
 }
 
@@ -184,6 +207,7 @@ func parseQueueDefinitions(value string) ([]liteq.QueueDefinition, error) {
 
 	parts := strings.Split(value, ",")
 	queues := make([]liteq.QueueDefinition, 0, len(parts))
+
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -192,12 +216,15 @@ func parseQueueDefinitions(value string) ([]liteq.QueueDefinition, error) {
 
 		pair := strings.SplitN(part, ":", 2)
 		queue := liteq.QueueDefinition{Name: strings.TrimSpace(pair[0])}
+
 		if queue.Name == "" {
 			return nil, fmt.Errorf("invalid queue definition %q: queue name must not be empty", part)
 		}
+
 		if len(pair) == 2 {
 			queue.DLQName = strings.TrimSpace(pair[1])
 		}
+
 		queues = append(queues, queue)
 	}
 
@@ -214,18 +241,21 @@ func parseSteps(value string) (all bool, steps int, err error) {
 	if err != nil {
 		return false, 0, fmt.Errorf("invalid --steps value %q: must be a positive integer or 'all'", value)
 	}
+
 	if steps <= 0 {
 		return false, 0, fmt.Errorf("invalid --steps value %q: must be a positive integer or 'all'", value)
 	}
+
 	return false, steps, nil
 }
 
 func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
+	for _, v := range values {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
 			return trimmed
 		}
 	}
+
 	return ""
 }
 
@@ -233,5 +263,6 @@ func printRootUsage(w io.Writer) {
 	if w == nil {
 		return
 	}
-	_, _ = fmt.Fprintln(w, "usage: liteq <migrate-up|migrate-down> [flags]")
+
+	_, _ = fmt.Fprintln(w, "usage: lq <migrate-up|migrate-down|version> [flags]")
 }

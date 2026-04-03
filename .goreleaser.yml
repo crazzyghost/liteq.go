@@ -1,7 +1,24 @@
 version: 2
 
 builds:
-  - skip: true
+  - id: lq
+    main: ./cmd/lq
+    binary: lq
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: lq
+    name_template: "lq_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
 
 changelog:
   sort: asc
