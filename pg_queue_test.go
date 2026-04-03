@@ -481,6 +481,41 @@ func TestPgQueue_PauseResume_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestPgQueue_Pause_IsIdempotent(t *testing.T) {
+	q, pool := newIntegrationTestQueue(t)
+	ctx := context.Background()
+
+	if err := q.Pause(ctx); err != nil {
+		t.Fatalf("Pause(first): %v", err)
+	}
+	if err := q.Pause(ctx); err != nil {
+		t.Fatalf("Pause(second): %v", err)
+	}
+
+	if got := countRowsForQueue(t, pool, q.queueStatesTable(), q.QueueName); got != 2 {
+		t.Fatalf("queue_states rows = %d, want 2", got)
+	}
+}
+
+func TestPgQueue_Resume_IsIdempotent(t *testing.T) {
+	q, pool := newIntegrationTestQueue(t)
+	ctx := context.Background()
+
+	if err := q.Pause(ctx); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	if err := q.Resume(ctx); err != nil {
+		t.Fatalf("Resume(first): %v", err)
+	}
+	if err := q.Resume(ctx); err != nil {
+		t.Fatalf("Resume(second): %v", err)
+	}
+
+	if got := countRowsForQueue(t, pool, q.queueStatesTable(), q.QueueName); got != 3 {
+		t.Fatalf("queue_states rows = %d, want 3", got)
+	}
+}
+
 func TestPgQueue_Drain_RemovesAllEntries(t *testing.T) {
 	q, pool := newIntegrationTestQueue(t)
 	enqueueIntegrationTestTasks(t, q, 5)

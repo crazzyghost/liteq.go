@@ -240,6 +240,20 @@ func TestRun_QueueHistory_RejectsNegativeLimit(t *testing.T) {
 	}
 }
 
+func TestRun_QueueHistory_AcceptsFlagsAfterQueueName(t *testing.T) {
+	t.Parallel()
+
+	var stderr bytes.Buffer
+	code := run(context.Background(), []string{"queue", "history", "my_queue", "--limit", "-1"}, nil, &stderr)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "invalid --limit value -1: must be >= 0") {
+		t.Fatalf("stderr = %q, want parsed --limit after queue name", stderr.String())
+	}
+}
+
 // ─── queue drain ─────────────────────────────────────────────────────────────
 
 func TestRun_QueueDrain_RequiresQueueName(t *testing.T) {
@@ -317,6 +331,23 @@ func TestPrintQueueTable_HeaderOnly(t *testing.T) {
 	// Only the header line — no queue data rows.
 	if strings.Count(out, "\n") != 1 {
 		t.Fatalf("output = %q, want exactly 1 line (header only)", out)
+	}
+}
+
+func TestQueueListQuery_ContainsSelectAndTables(t *testing.T) {
+	t.Parallel()
+
+	query := queueListQuery("liteq.queue_meta", "liteq.queue_states")
+	trimmed := strings.TrimSpace(query)
+
+	if !strings.HasPrefix(trimmed, "SELECT") {
+		t.Fatalf("query = %q, want SELECT prefix", trimmed)
+	}
+	if !strings.Contains(query, "FROM liteq.queue_meta s") {
+		t.Fatalf("query = %q, want queue_meta source", query)
+	}
+	if !strings.Contains(query, "FROM liteq.queue_states") {
+		t.Fatalf("query = %q, want queue_states source", query)
 	}
 }
 
@@ -452,5 +483,19 @@ func TestCLIQualifyIdentifier(t *testing.T) {
 					tc.schema, tc.name, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNormalizeInterspersedFlags(t *testing.T) {
+	t.Parallel()
+
+	got := normalizeInterspersedFlags(
+		[]string{"tasks", "--schema", "liteq_ops", "--database-url", "postgres://localhost/test", "--reason=manual"},
+		"schema", "database-url", "reason",
+	)
+	want := []string{"--schema", "liteq_ops", "--database-url", "postgres://localhost/test", "--reason=manual", "tasks"}
+
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("normalizeInterspersedFlags() = %#v, want %#v", got, want)
 	}
 }

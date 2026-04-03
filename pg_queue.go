@@ -102,7 +102,23 @@ func (q *PgQueue[T]) setQueueState(ctx context.Context, state, reason string) er
 }
 
 func (q *PgQueue[T]) setQueueStateInTx(ctx context.Context, tx pgx.Tx, state, reason string) error {
-	_, err := tx.Exec(
+	var currentState string
+	err := tx.QueryRow(
+		ctx,
+		fmt.Sprintf("SELECT state FROM %s WHERE queue_name = $1 FOR UPDATE", q.queueMetaTable()),
+		q.QueueName,
+	).Scan(&currentState)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("queue %s not found", q.QueueName)
+		}
+		return fmt.Errorf("query queue state for %s: %w", q.QueueName, err)
+	}
+	if currentState == state {
+		return nil
+	}
+
+	tag, err := tx.Exec(
 		ctx,
 		fmt.Sprintf("UPDATE %s SET state = $1, updated_at = NOW() WHERE queue_name = $2", q.queueMetaTable()),
 		state,
@@ -110,6 +126,9 @@ func (q *PgQueue[T]) setQueueStateInTx(ctx context.Context, tx pgx.Tx, state, re
 	)
 	if err != nil {
 		return fmt.Errorf("update queue state for %s: %w", q.QueueName, err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("update queue state for %s: expected 1 row, got %d", q.QueueName, tag.RowsAffected())
 	}
 
 	_, err = tx.Exec(

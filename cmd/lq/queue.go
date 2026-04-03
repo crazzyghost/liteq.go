@@ -57,6 +57,50 @@ func unexpectedArgsError(command string, args []string) error {
 	return fmt.Errorf("unexpected arguments for %s: %s", command, strings.Join(args, " "))
 }
 
+func normalizeInterspersedFlags(args []string, valueFlags ...string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+
+	valueFlagSet := make(map[string]struct{}, len(valueFlags))
+	for _, name := range valueFlags {
+		valueFlagSet[name] = struct{}{}
+	}
+
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, len(args))
+	expectValue := false
+	afterDoubleDash := false
+
+	for _, arg := range args {
+		switch {
+		case afterDoubleDash:
+			positionals = append(positionals, arg)
+		case expectValue:
+			flags = append(flags, arg)
+			expectValue = false
+		case arg == "--":
+			flags = append(flags, arg)
+			afterDoubleDash = true
+		case strings.HasPrefix(arg, "--"):
+			flags = append(flags, arg)
+			name := strings.TrimPrefix(arg, "--")
+			if cut := strings.IndexByte(name, '='); cut >= 0 {
+				continue
+			}
+			if _, ok := valueFlagSet[name]; ok {
+				expectValue = true
+			}
+		case strings.HasPrefix(arg, "-"):
+			flags = append(flags, arg)
+		default:
+			positionals = append(positionals, arg)
+		}
+	}
+
+	return append(flags, positionals...)
+}
+
 func optionalReason(value string) *string {
 	if strings.TrimSpace(value) == "" {
 		return nil
@@ -151,21 +195,7 @@ func runQueueList(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	metaTable := cliQualifyIdentifier(schema, "queue_meta")
 	statesTable := cliQualifyIdentifier(schema, "queue_states")
 
-	query := fmt.Sprintf(`
-    s.queue_name,
-    s.state,
-    COALESCE(e.changed_at, s.updated_at) AS since,
-    COALESCE(e.reason, '') AS reason
-FROM %s s
-LEFT JOIN LATERAL (
-    SELECT changed_at, reason
-    FROM %s
-    WHERE queue_name = s.queue_name
-    ORDER BY changed_at DESC
-    LIMIT 1
-) e ON true
-ORDER BY s.queue_name
-`, metaTable, statesTable)
+	query := queueListQuery(metaTable, statesTable)
 
 	rows, err := pool.Query(ctx, query)
 	if err != nil {
@@ -187,6 +217,25 @@ ORDER BY s.queue_name
 
 	printQueueTable(stdout, results)
 	return nil
+}
+
+func queueListQuery(metaTable, statesTable string) string {
+	return fmt.Sprintf(`
+SELECT
+    s.queue_name,
+    s.state,
+    COALESCE(e.changed_at, s.updated_at) AS since,
+    COALESCE(e.reason, '') AS reason
+FROM %s s
+LEFT JOIN LATERAL (
+    SELECT changed_at, reason
+    FROM %s
+    WHERE queue_name = s.queue_name
+    ORDER BY changed_at DESC
+    LIMIT 1
+) e ON true
+ORDER BY s.queue_name
+`, metaTable, statesTable)
 }
 
 func printQueueTable(w io.Writer, rows []queueStateRow) {
@@ -212,9 +261,8 @@ func runQueueResume(ctx context.Context, args []string, stdout, stderr io.Writer
 }
 
 // runQueueStateChange is the shared implementation for pause and resume. It
-// updates queue_meta.state and inserts a queue_states event in one transaction.
-// targetState is the desired state value ("paused" / "active"); verb is used
-// in the success message ("paused" / "resumed").
+// updates queue_meta.state and inserts a queue_states event in one transaction
+// only when the queue is transitioning to a new state.
 func runQueueStateChange(
 	ctx context.Context,
 	args []string,
@@ -228,7 +276,7 @@ func runQueueStateChange(
 	schemaFlag := fs.String("schema", "", "Target Postgres schema (default: liteq)")
 	reasonFlag := fs.String("reason", "", "Reason for the state change (recorded in history)")
 
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(normalizeInterspersedFlags(args, "database-url", "schema", "reason")); err != nil {
 		return fmt.Errorf("parse %s flags: %w", cmdName, err)
 	}
 
@@ -274,6 +322,26 @@ func runQueueStateChange(
 	metaTable := cliQualifyIdentifier(schema, "queue_meta")
 	statesTable := cliQualifyIdentifier(schema, "queue_states")
 
+	selectSQL := fmt.Sprintf(
+		`SELECT state FROM %s WHERE queue_name = $1 FOR UPDATE`,
+		metaTable,
+	)
+	var currentState string
+	if err = tx.QueryRow(ctx, selectSQL, queueName).Scan(&currentState); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("queue %q not found", queueName)
+		}
+		return fmt.Errorf("query %s queue state: %w", command, err)
+	}
+
+	if currentState == targetState {
+		if err = tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit %s: %w", command, err)
+		}
+		_, _ = fmt.Fprintf(stdout, "%s queue %q\n", verb, queueName)
+		return nil
+	}
+
 	updateSQL := fmt.Sprintf(
 		`UPDATE %s SET state = $1, updated_at = NOW() WHERE queue_name = $2`,
 		metaTable,
@@ -282,8 +350,8 @@ func runQueueStateChange(
 	if err != nil {
 		return fmt.Errorf("%s queue: %w", command, err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("queue %q not found", queueName)
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("%s queue %q: expected 1 updated row, got %d", command, queueName, tag.RowsAffected())
 	}
 
 	reason := optionalReason(*reasonFlag)
@@ -320,7 +388,7 @@ func runQueueHistory(ctx context.Context, args []string, stdout, stderr io.Write
 	schemaFlag := fs.String("schema", "", "Target Postgres schema (default: liteq)")
 	limitFlag := fs.Int("limit", 20, "Maximum number of events to display")
 
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(normalizeInterspersedFlags(args, "database-url", "schema", "limit")); err != nil {
 		return fmt.Errorf("parse queue history flags: %w", err)
 	}
 
@@ -404,7 +472,7 @@ func runQueueDrain(ctx context.Context, args []string, stdout, stderr io.Writer)
 	schemaFlag := fs.String("schema", "", "Target Postgres schema (default: liteq)")
 	reasonFlag := fs.String("reason", "", "Reason for draining (recorded in event history)")
 
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(normalizeInterspersedFlags(args, "database-url", "schema", "reason")); err != nil {
 		return fmt.Errorf("parse queue drain flags: %w", err)
 	}
 
