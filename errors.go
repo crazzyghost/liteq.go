@@ -56,3 +56,11 @@ func (e *ConsumerError) Error() string {
 func (e *ConsumerError) Unwrap() error {
 	return e.Source
 }
+
+// ErrQueuePaused is returned when an operation is attempted on a paused queue.
+// Use errors.Is(err, ErrQueuePaused) to check for this condition.
+var ErrQueuePaused = fmt.Errorf("queue is paused")
+
+// ErrQueueDraining is returned when an operation is attempted on a draining
+// queue. Use errors.Is(err, ErrQueueDraining) to check for this condition.
+var ErrQueueDraining = fmt.Errorf("queue is draining")

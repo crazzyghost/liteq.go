@@ -96,6 +96,10 @@ func isNilQueue[T any](queue Queue[T]) bool {
 	}
 }
 
+func isQueueUnavailable(err error) bool {
+	return errors.Is(err, ErrQueuePaused) || errors.Is(err, ErrQueueDraining)
+}
+
 // Stop signals the worker to drain and exit. Safe to call multiple times.
 func (w *Worker) Stop() {
 	w.stopOnce.Do(func() { close(w.done) })
@@ -122,6 +126,9 @@ func (w *Worker) Run(ctx context.Context, factory ConsumerFactory, interval time
 func (w *Worker) Poll(ctx context.Context) (tasks []Task, err error) {
 	tasks, err = w.TaskQueue.Dequeue(w.TaskBatchSize)
 	if err != nil {
+		if isQueueUnavailable(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	safeHook(func() { w.hooks.OnDequeue(ctx, w.TaskQueue.QueueLabel(), len(tasks)) })
@@ -195,6 +202,9 @@ func (w *Worker) Retry(ctx context.Context, task *Task, tx pgx.Tx) (err error) {
 
 	err = w.TaskQueue.Enqueue(*task, tx)
 	if err != nil {
+		if isQueueUnavailable(err) {
+			return w.DlqEnqueue(ctx, task, tx)
+		}
 		return err
 	}
 

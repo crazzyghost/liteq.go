@@ -89,6 +89,10 @@ type mockQueue struct {
 	updateStatusFn   func(context.Context, pgx.Tx, string, ...Condition) error
 	getRetryPolicyFn func(context.Context) (*RetryPolicy, error)
 	beginTxFn        func(context.Context) (pgx.Tx, context.Context, context.CancelFunc, error)
+	pauseFn          func(context.Context) error
+	resumeFn         func(context.Context) error
+	isPausedFn       func(context.Context) (bool, error)
+	drainFn          func(context.Context) error
 }
 
 func (m *mockQueue) Enqueue(item Task, tx pgx.Tx) error { //nolint:gocritic // test mock, value matches Queue interface
@@ -156,4 +160,32 @@ func (m *mockQueue) BeginTx(ctx context.Context) (pgx.Tx, context.Context, conte
 
 func (m *mockQueue) QueueLabel() string {
 	return m.label
+}
+
+func (m *mockQueue) Pause(ctx context.Context) error {
+	if m.pauseFn != nil {
+		return m.pauseFn(ctx)
+	}
+	return nil
+}
+
+func (m *mockQueue) Resume(ctx context.Context) error {
+	if m.resumeFn != nil {
+		return m.resumeFn(ctx)
+	}
+	return nil
+}
+
+func (m *mockQueue) IsPaused(ctx context.Context) (bool, error) {
+	if m.isPausedFn != nil {
+		return m.isPausedFn(ctx)
+	}
+	return false, nil
+}
+
+func (m *mockQueue) Drain(ctx context.Context) error {
+	if m.drainFn != nil {
+		return m.drainFn(ctx)
+	}
+	return nil
 }

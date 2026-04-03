@@ -6,7 +6,23 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
+
+type recordingHooks struct {
+	BaseHooks
+	dequeueCalls int
+	dlqCalls     int
+}
+
+func (h *recordingHooks) OnDequeue(context.Context, string, int) {
+	h.dequeueCalls++
+}
+
+func (h *recordingHooks) OnDLQ(context.Context, string, string) {
+	h.dlqCalls++
+}
 
 // ---- NewWorker validation ----
 
@@ -373,5 +389,129 @@ func TestRetry_PolicySelectorError(t *testing.T) {
 	err := w.Retry(context.Background(), &task, nil)
 	if err == nil {
 		t.Error("expected error when policy selector fails")
+	}
+}
+
+func TestWorker_Poll_SkipsPausedQueue(t *testing.T) {
+	hooks := &recordingHooks{}
+	q := &mockQueue{
+		label: "queue_tasks",
+		dequeueFn: func(int) ([]Task, error) {
+			return nil, fmt.Errorf("dequeue queue_tasks: %w", ErrQueuePaused)
+		},
+	}
+	worker, err := NewWorker(context.Background(), &WorkerConfig{
+		TaskQueue:       q,
+		DeadLetterQueue: &mockQueue{label: "queue_tasks_dead_letter"},
+		TaskBatchSize:   1,
+		Hooks:           hooks,
+	})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+
+	tasks, err := worker.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("Poll returned error: %v", err)
+	}
+	if tasks != nil {
+		t.Fatalf("Poll tasks = %#v, want nil", tasks)
+	}
+	if hooks.dequeueCalls != 0 {
+		t.Fatalf("OnDequeue calls = %d, want 0", hooks.dequeueCalls)
+	}
+}
+
+func TestWorker_Poll_SkipsDrainingQueue(t *testing.T) {
+	hooks := &recordingHooks{}
+	q := &mockQueue{
+		label: "queue_tasks",
+		dequeueFn: func(int) ([]Task, error) {
+			return nil, fmt.Errorf("dequeue queue_tasks: %w", ErrQueueDraining)
+		},
+	}
+	worker, err := NewWorker(context.Background(), &WorkerConfig{
+		TaskQueue:       q,
+		DeadLetterQueue: &mockQueue{label: "queue_tasks_dead_letter"},
+		TaskBatchSize:   1,
+		Hooks:           hooks,
+	})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+
+	tasks, err := worker.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("Poll returned error: %v", err)
+	}
+	if tasks != nil {
+		t.Fatalf("Poll tasks = %#v, want nil", tasks)
+	}
+	if hooks.dequeueCalls != 0 {
+		t.Fatalf("OnDequeue calls = %d, want 0", hooks.dequeueCalls)
+	}
+}
+
+func TestWorker_Retry_FallsToDLQ_WhenPaused(t *testing.T) {
+	hooks := &recordingHooks{}
+	worker, err := NewWorker(context.Background(), &WorkerConfig{
+		TaskQueue: &mockQueue{
+			label: "queue_tasks",
+			enqueueFn: func(Task, pgx.Tx) error {
+				return fmt.Errorf("enqueue queue_tasks: %w", ErrQueuePaused)
+			},
+		},
+		DeadLetterQueue: &mockQueue{
+			label:     "queue_tasks_dead_letter",
+			enqueueFn: func(Task, pgx.Tx) error { return nil },
+		},
+		TaskBatchSize: 1,
+		Hooks:         hooks,
+		GetTaskRetryPolicy: func(task Task) (*RetryPolicy, error) {
+			return task.RetryPolicy, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+
+	task := newTestTask("task-paused")
+	if err := worker.Retry(context.Background(), &task, nil); err != nil {
+		t.Fatalf("Retry returned error: %v", err)
+	}
+	if hooks.dlqCalls != 1 {
+		t.Fatalf("OnDLQ calls = %d, want 1", hooks.dlqCalls)
+	}
+}
+
+func TestWorker_Retry_FallsToDLQ_WhenDraining(t *testing.T) {
+	hooks := &recordingHooks{}
+	worker, err := NewWorker(context.Background(), &WorkerConfig{
+		TaskQueue: &mockQueue{
+			label: "queue_tasks",
+			enqueueFn: func(Task, pgx.Tx) error {
+				return fmt.Errorf("enqueue queue_tasks: %w", ErrQueueDraining)
+			},
+		},
+		DeadLetterQueue: &mockQueue{
+			label:     "queue_tasks_dead_letter",
+			enqueueFn: func(Task, pgx.Tx) error { return nil },
+		},
+		TaskBatchSize: 1,
+		Hooks:         hooks,
+		GetTaskRetryPolicy: func(task Task) (*RetryPolicy, error) {
+			return task.RetryPolicy, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+
+	task := newTestTask("task-draining")
+	if err := worker.Retry(context.Background(), &task, nil); err != nil {
+		t.Fatalf("Retry returned error: %v", err)
+	}
+	if hooks.dlqCalls != 1 {
+		t.Fatalf("OnDLQ calls = %d, want 1", hooks.dlqCalls)
 	}
 }

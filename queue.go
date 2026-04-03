@@ -69,6 +69,12 @@ type Queue[T any] interface {
 	GetRetryPolicy(ctx context.Context) (*RetryPolicy, error)
 	BeginTx(ctx context.Context) (pgx.Tx, context.Context, context.CancelFunc, error)
 	QueueLabel() string
+
+	// Queue state management.
+	Pause(ctx context.Context) error
+	Resume(ctx context.Context) error
+	IsPaused(ctx context.Context) (bool, error)
+	Drain(ctx context.Context) error
 }
 
 // BaseQueueEntryData is the data payload stored in a queue entry.

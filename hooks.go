@@ -17,6 +17,9 @@ type Hooks interface {
 	OnRetry(ctx context.Context, taskID string, attempt int, nextRunAt time.Time)
 	OnDLQ(ctx context.Context, taskID, reason string)
 	OnDLQFailed(ctx context.Context, taskID string, err error)
+	OnQueuePaused(ctx context.Context, queueName string)
+	OnQueueResumed(ctx context.Context, queueName string)
+	OnQueueDrained(ctx context.Context, queueName string)
 }
 
 // BaseHooks is a no-op Hooks implementation. Embed it in your own struct to
@@ -43,6 +46,15 @@ func (BaseHooks) OnDLQ(context.Context, string, string) {}
 
 // OnDLQFailed is a no-op implementation.
 func (BaseHooks) OnDLQFailed(context.Context, string, error) {}
+
+// OnQueuePaused is a no-op implementation.
+func (BaseHooks) OnQueuePaused(context.Context, string) {}
+
+// OnQueueResumed is a no-op implementation.
+func (BaseHooks) OnQueueResumed(context.Context, string) {}
+
+// OnQueueDrained is a no-op implementation.
+func (BaseHooks) OnQueueDrained(context.Context, string) {}
 
 // SlogHooks emits structured log lines via slog for each lifecycle event.
 type SlogHooks struct {
@@ -83,6 +95,21 @@ func (h SlogHooks) OnDLQ(ctx context.Context, taskID, reason string) {
 // OnDLQFailed logs a dead-letter queue enqueue failure.
 func (h SlogHooks) OnDLQFailed(ctx context.Context, taskID string, err error) {
 	h.Logger.ErrorContext(ctx, "task could not be sent to dead-letter queue", "id", taskID, "error", err)
+}
+
+// OnQueuePaused logs a queue pause event.
+func (h SlogHooks) OnQueuePaused(ctx context.Context, queueName string) {
+	h.Logger.InfoContext(ctx, "queue paused", slog.String("queue", queueName))
+}
+
+// OnQueueResumed logs a queue resume event.
+func (h SlogHooks) OnQueueResumed(ctx context.Context, queueName string) {
+	h.Logger.InfoContext(ctx, "queue resumed", slog.String("queue", queueName))
+}
+
+// OnQueueDrained logs a queue drain event.
+func (h SlogHooks) OnQueueDrained(ctx context.Context, queueName string) {
+	h.Logger.InfoContext(ctx, "queue drained", slog.String("queue", queueName))
 }
 
 // safeHook calls f, recovering from any panic so that a misbehaving hook

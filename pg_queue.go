@@ -54,6 +54,10 @@ func (q *PgQueue[T]) queueMetaTable() string {
 	return qualifyIdentifier(q.Schema, "queue_meta")
 }
 
+func (q *PgQueue[T]) queueStatesTable() string {
+	return qualifyIdentifier(q.Schema, "queue_states")
+}
+
 // BeginTx starts a new transaction scoped to the queue's TxTimeout.
 func (q *PgQueue[T]) BeginTx(ctx context.Context) (pgx.Tx, context.Context, context.CancelFunc, error) {
 	return q.beginTx(ctx)
@@ -64,8 +68,126 @@ func (q *PgQueue[T]) QueueLabel() string {
 	return q.QueueName
 }
 
+func (q *PgQueue[T]) getQueueState(ctx context.Context) (string, error) {
+	var state string
+	err := q.Pool.QueryRow(
+		ctx,
+		fmt.Sprintf("SELECT state FROM %s WHERE queue_name = $1", q.queueMetaTable()),
+		q.QueueName,
+	).Scan(&state)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "active", nil
+		}
+		return "", fmt.Errorf("get queue state %s: %w", q.QueueName, err)
+	}
+	return state, nil
+}
+
+func (q *PgQueue[T]) setQueueState(ctx context.Context, state, reason string) error {
+	tx, txCtx, cancel, err := q.beginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin set queue state for %s: %w", q.QueueName, err)
+	}
+	defer cancel()
+	defer rollback(tx)
+
+	if err := q.setQueueStateInTx(ctx, tx, state, reason); err != nil {
+		return err
+	}
+	if err := tx.Commit(txCtx); err != nil {
+		return fmt.Errorf("commit set queue state for %s: %w", q.QueueName, err)
+	}
+	return nil
+}
+
+func (q *PgQueue[T]) setQueueStateInTx(ctx context.Context, tx pgx.Tx, state, reason string) error {
+	_, err := tx.Exec(
+		ctx,
+		fmt.Sprintf("UPDATE %s SET state = $1, updated_at = NOW() WHERE queue_name = $2", q.queueMetaTable()),
+		state,
+		q.QueueName,
+	)
+	if err != nil {
+		return fmt.Errorf("update queue state for %s: %w", q.QueueName, err)
+	}
+
+	_, err = tx.Exec(
+		ctx,
+		fmt.Sprintf("INSERT INTO %s (queue_name, state, reason) VALUES ($1, $2, $3)", q.queueStatesTable()),
+		q.QueueName,
+		state,
+		reason,
+	)
+	if err != nil {
+		return fmt.Errorf("insert queue state event for %s: %w", q.QueueName, err)
+	}
+
+	return nil
+}
+
+// Pause marks the queue as paused and records the state change.
+func (q *PgQueue[T]) Pause(ctx context.Context) error {
+	if err := q.setQueueState(ctx, "paused", ""); err != nil {
+		return fmt.Errorf("pause queue %s: %w", q.QueueName, err)
+	}
+	return nil
+}
+
+// Resume marks the queue as active and records the state change.
+func (q *PgQueue[T]) Resume(ctx context.Context) error {
+	if err := q.setQueueState(ctx, "active", ""); err != nil {
+		return fmt.Errorf("resume queue %s: %w", q.QueueName, err)
+	}
+	return nil
+}
+
+// IsPaused reports whether the queue is currently paused.
+func (q *PgQueue[T]) IsPaused(ctx context.Context) (bool, error) {
+	state, err := q.getQueueState(ctx)
+	if err != nil {
+		return false, fmt.Errorf("check queue paused state %s: %w", q.QueueName, err)
+	}
+	return state == "paused", nil
+}
+
+// Drain deletes all queue entries and leaves the queue paused.
+func (q *PgQueue[T]) Drain(ctx context.Context) error {
+	tx, txCtx, cancel, err := q.beginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin drain for %s: %w", q.QueueName, err)
+	}
+	defer cancel()
+	defer rollback(tx)
+
+	if err := q.setQueueStateInTx(ctx, tx, "draining", "drain started"); err != nil {
+		return fmt.Errorf("drain queue %s: set draining state: %w", q.QueueName, err)
+	}
+	if _, err := tx.Exec(ctx, fmt.Sprintf("DELETE FROM %s", q.queueTable())); err != nil {
+		return fmt.Errorf("drain queue %s: delete entries: %w", q.QueueName, err)
+	}
+	if err := q.setQueueStateInTx(ctx, tx, "paused", "drain complete"); err != nil {
+		return fmt.Errorf("drain queue %s: set paused state: %w", q.QueueName, err)
+	}
+	if err := tx.Commit(txCtx); err != nil {
+		return fmt.Errorf("commit drain for %s: %w", q.QueueName, err)
+	}
+	return nil
+}
+
 // Enqueue inserts a queue entry into the queue table within the given transaction.
 func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
+	state, err := q.getQueueState(q.Ctx)
+	if err != nil {
+		return fmt.Errorf("enqueue %s: check queue state: %w", q.QueueName, err)
+	}
+	switch state {
+	case "paused":
+		return fmt.Errorf("enqueue %s: %w", q.QueueName, ErrQueuePaused)
+	case "draining":
+		return fmt.Errorf("enqueue %s: %w", q.QueueName, ErrQueueDraining)
+	}
+
 	entry, ok := interface{}(&item).(IQueueEntry)
 	if !ok {
 		return fmt.Errorf("item does not implement BaseQueueEntry")
@@ -116,6 +238,17 @@ func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
 
 // Dequeue claims up to batchSize pending tasks atomically, setting them to RUNNING.
 func (q *PgQueue[T]) Dequeue(batchSize int) (tasks []T, err error) {
+	state, err := q.getQueueState(q.Ctx)
+	if err != nil {
+		return nil, fmt.Errorf("dequeue %s: check queue state: %w", q.QueueName, err)
+	}
+	switch state {
+	case "paused":
+		return nil, fmt.Errorf("dequeue %s: %w", q.QueueName, ErrQueuePaused)
+	case "draining":
+		return nil, fmt.Errorf("dequeue %s: %w", q.QueueName, ErrQueueDraining)
+	}
+
 	tx, txCtx, cancel, err := q.beginTx(q.Ctx)
 	if err != nil {
 		return nil, fmt.Errorf("unable to start transaction: %w", err)

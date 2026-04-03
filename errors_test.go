@@ -3,6 +3,7 @@ package liteq
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -141,5 +142,43 @@ func TestBatchError_ContainsTaskError(t *testing.T) {
 	}
 	if !errors.Is(be, inner) {
 		t.Error("errors.Is should find inner through BatchError -> TaskError chain")
+	}
+}
+
+func TestErrQueuePaused_WrappingAndUnwrapping(t *testing.T) {
+	if !errors.Is(ErrQueuePaused, ErrQueuePaused) {
+		t.Fatal("ErrQueuePaused should match itself via errors.Is")
+	}
+
+	wrapped := fmt.Errorf("enqueue queue_tasks: %w", ErrQueuePaused)
+	if !errors.Is(wrapped, ErrQueuePaused) {
+		t.Fatal("wrapped paused error should match ErrQueuePaused")
+	}
+	if got := wrapped.Error(); !strings.Contains(got, "queue_tasks") || !strings.Contains(got, "queue is paused") {
+		t.Fatalf("wrapped paused error = %q", got)
+	}
+
+	doubleWrapped := fmt.Errorf("operation failed: %w", wrapped)
+	if !errors.Is(doubleWrapped, ErrQueuePaused) {
+		t.Fatal("double-wrapped paused error should match ErrQueuePaused")
+	}
+}
+
+func TestErrQueueDraining_WrappingAndUnwrapping(t *testing.T) {
+	if !errors.Is(ErrQueueDraining, ErrQueueDraining) {
+		t.Fatal("ErrQueueDraining should match itself via errors.Is")
+	}
+
+	wrapped := fmt.Errorf("enqueue queue_tasks: %w", ErrQueueDraining)
+	if !errors.Is(wrapped, ErrQueueDraining) {
+		t.Fatal("wrapped draining error should match ErrQueueDraining")
+	}
+	if got := wrapped.Error(); !strings.Contains(got, "queue_tasks") || !strings.Contains(got, "queue is draining") {
+		t.Fatalf("wrapped draining error = %q", got)
+	}
+
+	doubleWrapped := fmt.Errorf("operation failed: %w", wrapped)
+	if !errors.Is(doubleWrapped, ErrQueueDraining) {
+		t.Fatal("double-wrapped draining error should match ErrQueueDraining")
 	}
 }

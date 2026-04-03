@@ -2,9 +2,13 @@ package liteq
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ---- ParseRetryStrategy ----
@@ -283,5 +287,269 @@ func TestBaseQueueEntry_GetBaseQueueEntry_Direct(t *testing.T) {
 	}
 	if got != entry {
 		t.Error("GetBaseQueueEntry should return the same pointer")
+	}
+}
+
+func newIntegrationTestPool(t *testing.T) (pool *pgxpool.Pool, schema string) {
+	t.Helper()
+
+	databaseURL := os.Getenv("LITEQ_TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("integration test requires LITEQ_TEST_DATABASE_URL or DATABASE_URL")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Fatalf("ping database: %v", err)
+	}
+
+	schema = fmt.Sprintf("liteq_phase014_%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		mgr := NewSchemaManager(pool, WithSchemaManagerSchema(schema))
+		if err := mgr.MigrateDownAll(context.Background()); err != nil {
+			t.Fatalf("cleanup schema %s: %v", schema, err)
+		}
+		pool.Close()
+	})
+
+	return pool, schema
+}
+
+func newIntegrationTestQueue(t *testing.T) (*PgQueue[Task], *pgxpool.Pool) {
+	t.Helper()
+
+	pool, schema := newIntegrationTestPool(t)
+	ctx := context.Background()
+	queueName := fmt.Sprintf("queue_tasks_%d", time.Now().UnixNano())
+	mgr := NewSchemaManager(pool, WithSchemaManagerSchema(schema))
+	if err := mgr.EnsureQueue(ctx, queueName, ""); err != nil {
+		t.Fatalf("EnsureQueue: %v", err)
+	}
+
+	q, err := NewPgQueue[Task](ctx, pool, queueName, &RetryPolicy{
+		Strategy:     StrategyExponential,
+		MaxRetries:   3,
+		RetryDelayMs: 100,
+		MaxDelayMs:   10000,
+	}, WithSchema(schema))
+	if err != nil {
+		t.Fatalf("NewPgQueue: %v", err)
+	}
+	return q, pool
+}
+
+func enqueueIntegrationTestTasks(t *testing.T, q *PgQueue[Task], count int) {
+	t.Helper()
+
+	tx, txCtx, cancel, err := q.BeginTx(context.Background())
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	defer cancel()
+	defer rollback(tx)
+
+	for i := range count {
+		task := newTestTask(fmt.Sprintf("task-%d", i))
+		if err := q.Enqueue(task, tx); err != nil {
+			t.Fatalf("Enqueue(%d): %v", i, err)
+		}
+	}
+
+	if err := tx.Commit(txCtx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+}
+
+func countRowsForQueue(t *testing.T, pool *pgxpool.Pool, table, queueName string) int {
+	t.Helper()
+
+	var count int
+	err := pool.QueryRow(
+		context.Background(),
+		fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE queue_name = $1", table),
+		queueName,
+	).Scan(&count)
+	if err != nil {
+		t.Fatalf("count rows in %s: %v", table, err)
+	}
+	return count
+}
+
+func TestPgQueue_Enqueue_RejectsWhenPaused(t *testing.T) {
+	q, _ := newIntegrationTestQueue(t)
+	if err := q.Pause(context.Background()); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+
+	err := q.Enqueue(newTestTask("paused-enqueue"), nil)
+	if !errors.Is(err, ErrQueuePaused) {
+		t.Fatalf("Enqueue error = %v, want ErrQueuePaused", err)
+	}
+}
+
+func TestPgQueue_Enqueue_RejectsWhenDraining(t *testing.T) {
+	q, _ := newIntegrationTestQueue(t)
+	if err := q.setQueueState(context.Background(), "draining", "test draining state"); err != nil {
+		t.Fatalf("setQueueState: %v", err)
+	}
+
+	err := q.Enqueue(newTestTask("draining-enqueue"), nil)
+	if !errors.Is(err, ErrQueueDraining) {
+		t.Fatalf("Enqueue error = %v, want ErrQueueDraining", err)
+	}
+}
+
+func TestPgQueue_Dequeue_RejectsWhenPaused(t *testing.T) {
+	q, _ := newIntegrationTestQueue(t)
+	if err := q.Pause(context.Background()); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+
+	_, err := q.Dequeue(1)
+	if !errors.Is(err, ErrQueuePaused) {
+		t.Fatalf("Dequeue error = %v, want ErrQueuePaused", err)
+	}
+}
+
+func TestPgQueue_Dequeue_RejectsWhenDraining(t *testing.T) {
+	q, _ := newIntegrationTestQueue(t)
+	if err := q.setQueueState(context.Background(), "draining", "test draining state"); err != nil {
+		t.Fatalf("setQueueState: %v", err)
+	}
+
+	_, err := q.Dequeue(1)
+	if !errors.Is(err, ErrQueueDraining) {
+		t.Fatalf("Dequeue error = %v, want ErrQueueDraining", err)
+	}
+}
+
+func TestPgQueue_IsPaused_DefaultsToFalseForUnregistered(t *testing.T) {
+	pool, schema := newIntegrationTestPool(t)
+	mgr := NewSchemaManager(pool, WithSchemaManagerSchema(schema))
+	if err := mgr.EnsureSchema(context.Background()); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	q, err := NewPgQueue[Task](context.Background(), pool, fmt.Sprintf("queue_unregistered_%d", time.Now().UnixNano()), nil, WithSchema(schema))
+	if err != nil {
+		t.Fatalf("NewPgQueue: %v", err)
+	}
+
+	paused, err := q.IsPaused(context.Background())
+	if err != nil {
+		t.Fatalf("IsPaused: %v", err)
+	}
+	if paused {
+		t.Fatal("IsPaused returned true, want false")
+	}
+}
+
+func TestPgQueue_PauseResume_RoundTrip(t *testing.T) {
+	q, _ := newIntegrationTestQueue(t)
+	ctx := context.Background()
+
+	if err := q.Pause(ctx); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	paused, err := q.IsPaused(ctx)
+	if err != nil {
+		t.Fatalf("IsPaused after Pause: %v", err)
+	}
+	if !paused {
+		t.Fatal("IsPaused after Pause = false, want true")
+	}
+
+	if err := q.Resume(ctx); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	paused, err = q.IsPaused(ctx)
+	if err != nil {
+		t.Fatalf("IsPaused after Resume: %v", err)
+	}
+	if paused {
+		t.Fatal("IsPaused after Resume = true, want false")
+	}
+}
+
+func TestPgQueue_Drain_RemovesAllEntries(t *testing.T) {
+	q, pool := newIntegrationTestQueue(t)
+	enqueueIntegrationTestTasks(t, q, 5)
+
+	if err := q.Drain(context.Background()); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+
+	var count int
+	err := pool.QueryRow(context.Background(), fmt.Sprintf("SELECT COUNT(*) FROM %s", q.queueTable())).Scan(&count)
+	if err != nil {
+		t.Fatalf("count queue rows: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("queue row count = %d, want 0", count)
+	}
+}
+
+func TestPgQueue_Drain_TransitionsToPaused(t *testing.T) {
+	q, pool := newIntegrationTestQueue(t)
+	enqueueIntegrationTestTasks(t, q, 2)
+
+	if err := q.Drain(context.Background()); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+
+	paused, err := q.IsPaused(context.Background())
+	if err != nil {
+		t.Fatalf("IsPaused: %v", err)
+	}
+	if !paused {
+		t.Fatal("IsPaused after Drain = false, want true")
+	}
+
+	state, err := q.getQueueState(context.Background())
+	if err != nil {
+		t.Fatalf("getQueueState: %v", err)
+	}
+	if state != "paused" {
+		t.Fatalf("queue state = %q, want paused", state)
+	}
+
+	if got := countRowsForQueue(t, pool, q.queueStatesTable(), q.QueueName); got != 3 {
+		t.Fatalf("queue_states rows = %d, want 3", got)
+	}
+}
+
+func TestPgQueue_Drain_EmptyQueueSucceeds(t *testing.T) {
+	q, _ := newIntegrationTestQueue(t)
+	if err := q.Drain(context.Background()); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+
+	paused, err := q.IsPaused(context.Background())
+	if err != nil {
+		t.Fatalf("IsPaused: %v", err)
+	}
+	if !paused {
+		t.Fatal("IsPaused after empty drain = false, want true")
+	}
+}
+
+func TestPgQueue_Drain_RecordsTwoEvents(t *testing.T) {
+	q, pool := newIntegrationTestQueue(t)
+	if err := q.Drain(context.Background()); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+
+	if got := countRowsForQueue(t, pool, q.queueStatesTable(), q.QueueName); got != 3 {
+		t.Fatalf("queue_states rows = %d, want 3", got)
 	}
 }

@@ -22,6 +22,9 @@ func TestBaseHooks_NoPanic(_ *testing.T) {
 	h.OnRetry(ctx, "id-1", 2, now)
 	h.OnDLQ(ctx, "id-1", "max retries exceeded")
 	h.OnDLQFailed(ctx, "id-1", nil)
+	h.OnQueuePaused(ctx, "q")
+	h.OnQueueResumed(ctx, "q")
+	h.OnQueueDrained(ctx, "q")
 }
 
 func newTestSlogHooks(t *testing.T) (SlogHooks, *bytes.Buffer) {
@@ -105,6 +108,39 @@ func TestSlogHooks_OnDLQFailed(t *testing.T) {
 	for _, want := range []string{"could not be sent", "task-8"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("OnDLQFailed log missing %q in: %s", want, out)
+		}
+	}
+}
+
+func TestSlogHooks_OnQueuePaused(t *testing.T) {
+	h, buf := newTestSlogHooks(t)
+	h.OnQueuePaused(context.Background(), "queue_tasks")
+	out := buf.String()
+	for _, want := range []string{"queue paused", "queue_tasks"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("OnQueuePaused log missing %q in: %s", want, out)
+		}
+	}
+}
+
+func TestSlogHooks_OnQueueResumed(t *testing.T) {
+	h, buf := newTestSlogHooks(t)
+	h.OnQueueResumed(context.Background(), "queue_tasks")
+	out := buf.String()
+	for _, want := range []string{"queue resumed", "queue_tasks"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("OnQueueResumed log missing %q in: %s", want, out)
+		}
+	}
+}
+
+func TestSlogHooks_OnQueueDrained(t *testing.T) {
+	h, buf := newTestSlogHooks(t)
+	h.OnQueueDrained(context.Background(), "queue_tasks")
+	out := buf.String()
+	for _, want := range []string{"queue drained", "queue_tasks"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("OnQueueDrained log missing %q in: %s", want, out)
 		}
 	}
 }
