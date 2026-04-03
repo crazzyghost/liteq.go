@@ -74,6 +74,8 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		return runMigrateUp(ctx, args[1:], stdout, stderr)
 	case "migrate-down":
 		return runMigrateDown(ctx, args[1:], stdout, stderr)
+	case "queue":
+		return runQueue(ctx, args[1:], stdout, stderr)
 	default:
 		printRootUsage(stderr)
 		return fmt.Errorf("unknown command: %s", args[0])
@@ -264,5 +266,5 @@ func printRootUsage(w io.Writer) {
 		return
 	}
 
-	_, _ = fmt.Fprintln(w, "usage: lq <migrate-up|migrate-down|version> [flags]")
+	_, _ = fmt.Fprintln(w, "usage: lq <migrate-up|migrate-down|queue|version> [flags]")
 }
