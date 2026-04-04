@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
+	liteq "github.com/crazzyghost/liteq.go"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/pflag"
-	liteq "github.com/crazzyghost/liteq.go"
 )
 
 // cliIdentifierPattern mirrors schema_manager.identifierPattern. It is

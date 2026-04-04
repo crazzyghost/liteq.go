@@ -8,9 +8,9 @@ import (
 	"os"
 	"strings"
 
+	liteq "github.com/crazzyghost/liteq.go"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/pflag"
-	liteq "github.com/crazzyghost/liteq.go"
 )
 
 // version is the binary version, injected at build time via -X main.version=<tag>.

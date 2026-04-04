@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	liteq "github.com/crazzyghost/liteq.go"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func restoreCLIHooks(t *testing.T) {
