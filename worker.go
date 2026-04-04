@@ -21,8 +21,8 @@ type TaskRetryPolicySelector func(task Task) (*RetryPolicy, error)
 // WorkerConfig holds the configuration used to construct a Worker.
 type WorkerConfig struct {
 	TaskBatchSize      int
-	TaskQueue          Queue[Task]
-	DeadLetterQueue    Queue[Task]
+	TaskQueue          Queue
+	DeadLetterQueue    Queue
 	GetTaskRetryPolicy TaskRetryPolicySelector
 	MaxConcurrency     int           // default: runtime.NumCPU()
 	TaskTimeout        time.Duration // default: 30s
@@ -34,8 +34,8 @@ type WorkerConfig struct {
 type Worker struct {
 	Ctx                context.Context
 	TaskBatchSize      int
-	TaskQueue          Queue[Task]
-	DeadLetterQueue    Queue[Task]
+	TaskQueue          Queue
+	DeadLetterQueue    Queue
 	GetTaskRetryPolicy TaskRetryPolicySelector
 	MaxConcurrency     int
 	TaskTimeout        time.Duration
@@ -82,7 +82,7 @@ func NewWorker(ctx context.Context, config *WorkerConfig) (*Worker, error) {
 	}, nil
 }
 
-func isNilQueue[T any](queue Queue[T]) bool {
+func isNilQueue(queue Queue) bool {
 	if queue == nil {
 		return true
 	}

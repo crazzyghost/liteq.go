@@ -233,7 +233,8 @@ Operational notes:
 
 ## Go Compatibility Notes
 
-- `BaseQueueEntry` models the same persisted fields in Go.
+- `Task` is the primary Go row model for queue APIs.
+- `BaseQueueEntry` models the same persisted fields as deprecated compatibility data.
 - SQL column names remain the protocol source of truth.
 - Some Go JSON tags use camelCase while audit timestamps use snake_case; client
   libraries should normalize names deliberately rather than infer them.

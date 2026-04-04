@@ -49,7 +49,7 @@ func TestNewWorker_NilDLQ(t *testing.T) {
 }
 
 func TestNewWorker_TypedNilQueue(t *testing.T) {
-	var q *PgQueue[Task]
+	var q *PgQueue
 	dlq := &mockQueue{label: "queue_tasks_dead_letter"}
 
 	_, err := NewWorker(context.Background(), &WorkerConfig{

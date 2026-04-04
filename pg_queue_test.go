@@ -48,14 +48,14 @@ func TestParseRetryStrategy(t *testing.T) {
 
 func TestNewPgQueue_NilCtx(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
-	_, err := NewPgQueue[Task](nil, q.Pool, "q", nil) //nolint:staticcheck // deliberately testing nil ctx
+	_, err := NewPgQueue(nil, q.Pool, "q", nil) //nolint:staticcheck // deliberately testing nil ctx
 	if err == nil {
 		t.Error("expected error for nil ctx")
 	}
 }
 
 func TestNewPgQueue_NilPool(t *testing.T) {
-	_, err := NewPgQueue[Task](context.Background(), nil, "queue_tasks", nil)
+	_, err := NewPgQueue(context.Background(), nil, "queue_tasks", nil)
 	if err == nil {
 		t.Error("expected error for nil pool")
 	}
@@ -63,7 +63,7 @@ func TestNewPgQueue_NilPool(t *testing.T) {
 
 func TestNewPgQueue_EmptyName(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
-	_, err := NewPgQueue[Task](context.Background(), q.Pool, "", nil)
+	_, err := NewPgQueue(context.Background(), q.Pool, "", nil)
 	if err == nil {
 		t.Error("expected error for empty queue name")
 	}
@@ -71,7 +71,7 @@ func TestNewPgQueue_EmptyName(t *testing.T) {
 
 func TestNewPgQueue_NilRetryPolicy_OK(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
-	got, err := NewPgQueue[Task](context.Background(), q.Pool, "queue_tasks", nil)
+	got, err := NewPgQueue(context.Background(), q.Pool, "queue_tasks", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestNewPgQueue_NilRetryPolicy_OK(t *testing.T) {
 
 func TestNewPgQueue_NegativeMaxRetries(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
-	_, err := NewPgQueue[Task](context.Background(), q.Pool, "q", &RetryPolicy{
+	_, err := NewPgQueue(context.Background(), q.Pool, "q", &RetryPolicy{
 		MaxRetries:   -1,
 		RetryDelayMs: 100,
 		Strategy:     StrategyFixed,
@@ -94,7 +94,7 @@ func TestNewPgQueue_NegativeMaxRetries(t *testing.T) {
 
 func TestNewPgQueue_ZeroRetryDelayMs(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
-	_, err := NewPgQueue[Task](context.Background(), q.Pool, "q", &RetryPolicy{
+	_, err := NewPgQueue(context.Background(), q.Pool, "q", &RetryPolicy{
 		MaxRetries:   3,
 		RetryDelayMs: 0,
 		Strategy:     StrategyFixed,
@@ -106,7 +106,7 @@ func TestNewPgQueue_ZeroRetryDelayMs(t *testing.T) {
 
 func TestNewPgQueue_InvalidStrategy(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
-	_, err := NewPgQueue[Task](context.Background(), q.Pool, "q", &RetryPolicy{
+	_, err := NewPgQueue(context.Background(), q.Pool, "q", &RetryPolicy{
 		MaxRetries:   3,
 		RetryDelayMs: 100,
 		Strategy:     "badstrategy",
@@ -118,7 +118,7 @@ func TestNewPgQueue_InvalidStrategy(t *testing.T) {
 
 func TestNewPgQueue_NormalisesEmptyStrategy(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
-	got, err := NewPgQueue[Task](context.Background(), q.Pool, "queue_tasks", &RetryPolicy{
+	got, err := NewPgQueue(context.Background(), q.Pool, "queue_tasks", &RetryPolicy{
 		MaxRetries:   1,
 		RetryDelayMs: 50,
 		Strategy:     "", // empty → exponential
@@ -133,7 +133,7 @@ func TestNewPgQueue_NormalisesEmptyStrategy(t *testing.T) {
 
 func TestNewPgQueue_DefaultTxTimeout(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
-	got, err := NewPgQueue[Task](context.Background(), q.Pool, "queue_tasks", nil)
+	got, err := NewPgQueue(context.Background(), q.Pool, "queue_tasks", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestNewPgQueue_DefaultTxTimeout(t *testing.T) {
 
 func TestNewPgQueue_DefaultSchema(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
-	got, err := NewPgQueue[Task](context.Background(), q.Pool, "queue_tasks", nil)
+	got, err := NewPgQueue(context.Background(), q.Pool, "queue_tasks", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestNewPgQueue_DefaultSchema(t *testing.T) {
 
 func TestNewPgQueue_WithSchemaOptOut(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
-	got, err := NewPgQueue[Task](context.Background(), q.Pool, "queue_tasks", nil, WithSchema(""))
+	got, err := NewPgQueue(context.Background(), q.Pool, "queue_tasks", nil, WithSchema(""))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestNewPgQueue_WithSchemaOptOut(t *testing.T) {
 
 func TestNewPgQueue_InvalidSchema(t *testing.T) {
 	q := newFakePgQueue(t, "queue_tasks")
-	_, err := NewPgQueue[Task](context.Background(), q.Pool, "queue_tasks", nil, WithSchema("bad-schema"))
+	_, err := NewPgQueue(context.Background(), q.Pool, "queue_tasks", nil, WithSchema("bad-schema"))
 	if err == nil {
 		t.Fatal("expected error for invalid schema")
 	}
@@ -249,16 +249,12 @@ func TestTaskStatusValues(t *testing.T) {
 	}
 }
 
-// ---- BaseQueueEntry ----
+// ---- Flat Task ----
 
-func TestBaseQueueEntry_GetBaseQueueEntry(t *testing.T) {
+func TestTask_UsesFlattenedFields(t *testing.T) {
 	task := newTestTask("id-1")
-	entry := task.GetBaseQueueEntry()
-	if entry == nil {
-		t.Fatal("GetBaseQueueEntry() returned nil")
-	}
-	if entry.ID != "id-1" {
-		t.Errorf("entry.ID = %q, want %q", entry.ID, "id-1")
+	if task.ID != "id-1" {
+		t.Errorf("Task.ID = %q, want %q", task.ID, "id-1")
 	}
 }
 
@@ -271,22 +267,6 @@ func TestConsumerError_NonTransient_FlagSet(t *testing.T) {
 	}
 	if !ce.IsNonTransient {
 		t.Error("IsNonTransient should be true")
-	}
-}
-
-// ---- BaseQueueEntry.GetBaseQueueEntry (queue.go) ----
-
-func TestBaseQueueEntry_GetBaseQueueEntry_Direct(t *testing.T) {
-	entry := &BaseQueueEntry{ID: "direct-id"}
-	got := entry.GetBaseQueueEntry()
-	if got == nil {
-		t.Fatal("GetBaseQueueEntry returned nil")
-	}
-	if got.ID != "direct-id" {
-		t.Errorf("ID = %q, want %q", got.ID, "direct-id")
-	}
-	if got != entry {
-		t.Error("GetBaseQueueEntry should return the same pointer")
 	}
 }
 
@@ -325,7 +305,7 @@ func newIntegrationTestPool(t *testing.T) (pool *pgxpool.Pool, schema string) {
 	return pool, schema
 }
 
-func newIntegrationTestQueue(t *testing.T) (*PgQueue[Task], *pgxpool.Pool) {
+func newIntegrationTestQueue(t *testing.T) (*PgQueue, *pgxpool.Pool) {
 	t.Helper()
 
 	pool, schema := newIntegrationTestPool(t)
@@ -336,7 +316,7 @@ func newIntegrationTestQueue(t *testing.T) (*PgQueue[Task], *pgxpool.Pool) {
 		t.Fatalf("EnsureQueue: %v", err)
 	}
 
-	q, err := NewPgQueue[Task](ctx, pool, queueName, &RetryPolicy{
+	q, err := NewPgQueue(ctx, pool, queueName, &RetryPolicy{
 		Strategy:     StrategyExponential,
 		MaxRetries:   3,
 		RetryDelayMs: 100,
@@ -348,7 +328,7 @@ func newIntegrationTestQueue(t *testing.T) (*PgQueue[Task], *pgxpool.Pool) {
 	return q, pool
 }
 
-func enqueueIntegrationTestTasks(t *testing.T, q *PgQueue[Task], count int) {
+func enqueueIntegrationTestTasks(t *testing.T, q *PgQueue, count int) {
 	t.Helper()
 
 	tx, txCtx, cancel, err := q.BeginTx(context.Background())
@@ -440,7 +420,7 @@ func TestPgQueue_IsPaused_DefaultsToFalseForUnregistered(t *testing.T) {
 		t.Fatalf("EnsureSchema: %v", err)
 	}
 
-	q, err := NewPgQueue[Task](context.Background(), pool, fmt.Sprintf("queue_unregistered_%d", time.Now().UnixNano()), nil, WithSchema(schema))
+	q, err := NewPgQueue(context.Background(), pool, fmt.Sprintf("queue_unregistered_%d", time.Now().UnixNano()), nil, WithSchema(schema))
 	if err != nil {
 		t.Fatalf("NewPgQueue: %v", err)
 	}

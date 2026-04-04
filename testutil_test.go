@@ -12,25 +12,23 @@ import (
 // newTestTask returns a Task with sensible defaults for unit tests.
 func newTestTask(id string) Task {
 	return Task{
-		BaseQueueEntry: BaseQueueEntry{
-			ID:      id,
-			Data:    map[string]any{"key": "value"},
-			Status:  string(PENDING),
-			IsRetry: false,
-			Retries: 0,
-			RetryPolicy: &RetryPolicy{
-				Strategy:     StrategyExponential,
-				MaxRetries:   3,
-				RetryDelayMs: 100,
-				MaxDelayMs:   10000,
-			},
+		ID:      id,
+		Data:    map[string]any{"key": "value"},
+		Status:  string(PENDING),
+		IsRetry: false,
+		Retries: 0,
+		RetryPolicy: &RetryPolicy{
+			Strategy:     StrategyExponential,
+			MaxRetries:   3,
+			RetryDelayMs: 100,
+			MaxDelayMs:   10000,
 		},
 	}
 }
 
 // newFakePgQueue creates a PgQueue backed by a lazily-connecting pool.
 // No real Postgres is needed; only methods that do NOT execute SQL are safe to call.
-func newFakePgQueue(t *testing.T, name string) *PgQueue[Task] {
+func newFakePgQueue(t *testing.T, name string) *PgQueue {
 	t.Helper()
 	cfg, err := pgxpool.ParseConfig("postgres://fake:fake@localhost:5432/fake?connect_timeout=1")
 	if err != nil {
@@ -40,7 +38,7 @@ func newFakePgQueue(t *testing.T, name string) *PgQueue[Task] {
 	if err != nil {
 		t.Fatalf("new pool: %v", err)
 	}
-	q, err := NewPgQueue[Task](context.Background(), pool, name, &RetryPolicy{
+	q, err := NewPgQueue(context.Background(), pool, name, &RetryPolicy{
 		Strategy:     StrategyExponential,
 		MaxRetries:   3,
 		RetryDelayMs: 100,

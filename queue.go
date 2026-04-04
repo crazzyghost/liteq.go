@@ -58,10 +58,10 @@ func (q BaseQueue) QualifiedQueueName() string {
 //
 // The method set mirrors the current PgQueue API so callers can depend on an
 // interface without forcing a breaking rewrite of the package surface.
-type Queue[T any] interface {
-	Enqueue(item T, tx pgx.Tx) error
-	Dequeue(batchSize int) ([]T, error)
-	UpdateEntry(item T, tx pgx.Tx, conditions ...Condition) error
+type Queue interface {
+	Enqueue(task Task, tx pgx.Tx) error
+	Dequeue(batchSize int) ([]Task, error)
+	UpdateEntry(task Task, tx pgx.Tx, conditions ...Condition) error
 	CheckCondition(ctx context.Context, tx pgx.Tx, conditions ...Condition) (bool, error)
 	Select(ctx context.Context, scan func(pgx.Rows) error, mods ...SelectMod) error
 	SelectOne(ctx context.Context, scan func(pgx.Rows) error, mods ...SelectMod) (bool, error)
@@ -77,36 +77,8 @@ type Queue[T any] interface {
 	Drain(ctx context.Context) error
 }
 
-// BaseQueueEntryData is the data payload stored in a queue entry.
-type BaseQueueEntryData interface{}
-
-// BaseQueueEntry represents a single row in a queue table.
-type BaseQueueEntry struct {
-	ID          string             `json:"id" db:"id"`
-	Data        BaseQueueEntryData `json:"data" db:"data"`
-	Status      string             `json:"status" db:"status"`
-	IsRetry     bool               `json:"isRetry" db:"is_retry"`
-	Retries     int                `json:"retries" db:"retries"`
-	RetryPolicy *RetryPolicy       `json:"retryPolicy" db:"retry_policy"`
-	NextRunAt   *time.Time         `json:"nextRunAt" db:"next_run_at"`
-	LastRunAt   *time.Time         `json:"lastRunAt" db:"last_run_at"`
-	ProcessedAt *time.Time         `json:"processedAt" db:"processed_at"`
-	EnqueuedAt  *time.Time         `json:"enqueued_at" db:"enqueued_at"`
-	DequeuedAt  *time.Time         `json:"dequeued_at" db:"dequeued_at"`
-	CreatedAt   *time.Time         `json:"created_at" db:"created_at"`
-	UpdatedAt   *time.Time         `json:"updated_at" db:"updated_at"`
-	DeletedAt   *time.Time         `json:"deleted_at" db:"deleted_at"`
-}
-
-// IQueueEntry is implemented by types that embed a BaseQueueEntry.
-type IQueueEntry interface {
-	GetBaseQueueEntry() *BaseQueueEntry
-}
-
-// GetBaseQueueEntry returns the receiver itself, satisfying IQueueEntry.
-func (e *BaseQueueEntry) GetBaseQueueEntry() *BaseQueueEntry {
-	return e
-}
+// QueueData is the data payload stored in a queue entry.
+type QueueData interface{}
 
 type pgQueueConfig struct {
 	schema      string

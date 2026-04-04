@@ -1,7 +1,7 @@
 # SQL Operation Contracts
 
 This document captures the canonical SQL operations that make up the liteq
-queue protocol. The Go `PgQueue[T]` type is the reference implementation, but
+queue protocol. The Go `PgQueue` type is the reference implementation, but
 any compliant client can implement the same operations with its own Postgres
 driver.
 

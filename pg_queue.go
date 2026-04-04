@@ -18,7 +18,7 @@ import (
 
 // PgQueue is a PostgreSQL-backed queue that stores and retrieves entries
 // using pgxpool transactions.
-type PgQueue[T interface{}] struct {
+type PgQueue struct {
 	BaseQueue
 	Pool            *pgxpool.Pool
 	retryPolicyOnce sync.Once
@@ -26,7 +26,7 @@ type PgQueue[T interface{}] struct {
 	retryPolicyErr  error
 }
 
-var _ Queue[Task] = (*PgQueue[Task])(nil)
+var _ Queue = (*PgQueue)(nil)
 
 // rollback executes a transaction rollback, suppressing pgx.ErrTxClosed which
 // is expected after a successful Commit, and logging any other error.
@@ -36,7 +36,7 @@ func rollback(tx pgx.Tx) {
 
 // beginTx creates a context-scoped transaction with the queue's TxTimeout.
 // The caller must defer the returned cancel to avoid a context leak.
-func (q *PgQueue[T]) beginTx(ctx context.Context) (pgx.Tx, context.Context, context.CancelFunc, error) {
+func (q *PgQueue) beginTx(ctx context.Context) (pgx.Tx, context.Context, context.CancelFunc, error) {
 	txCtx, cancel := context.WithTimeout(ctx, q.TxTimeout)
 	tx, err := q.Pool.Begin(txCtx)
 	if err != nil {
@@ -46,29 +46,29 @@ func (q *PgQueue[T]) beginTx(ctx context.Context) (pgx.Tx, context.Context, cont
 	return tx, txCtx, cancel, nil
 }
 
-func (q *PgQueue[T]) queueTable() string {
+func (q *PgQueue) queueTable() string {
 	return qualifyIdentifier(q.Schema, q.QueueName)
 }
 
-func (q *PgQueue[T]) queueMetaTable() string {
+func (q *PgQueue) queueMetaTable() string {
 	return qualifyIdentifier(q.Schema, "queue_meta")
 }
 
-func (q *PgQueue[T]) queueStatesTable() string {
+func (q *PgQueue) queueStatesTable() string {
 	return qualifyIdentifier(q.Schema, "queue_states")
 }
 
 // BeginTx starts a new transaction scoped to the queue's TxTimeout.
-func (q *PgQueue[T]) BeginTx(ctx context.Context) (pgx.Tx, context.Context, context.CancelFunc, error) {
+func (q *PgQueue) BeginTx(ctx context.Context) (pgx.Tx, context.Context, context.CancelFunc, error) {
 	return q.beginTx(ctx)
 }
 
 // QueueLabel returns the queue's table name for display/logging purposes.
-func (q *PgQueue[T]) QueueLabel() string {
+func (q *PgQueue) QueueLabel() string {
 	return q.QueueName
 }
 
-func (q *PgQueue[T]) getQueueState(ctx context.Context) (string, error) {
+func (q *PgQueue) getQueueState(ctx context.Context) (string, error) {
 	var state string
 	err := q.Pool.QueryRow(
 		ctx,
@@ -84,7 +84,7 @@ func (q *PgQueue[T]) getQueueState(ctx context.Context) (string, error) {
 	return state, nil
 }
 
-func (q *PgQueue[T]) setQueueState(ctx context.Context, state, reason string) error {
+func (q *PgQueue) setQueueState(ctx context.Context, state, reason string) error {
 	tx, txCtx, cancel, err := q.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("begin set queue state for %s: %w", q.QueueName, err)
@@ -101,7 +101,7 @@ func (q *PgQueue[T]) setQueueState(ctx context.Context, state, reason string) er
 	return nil
 }
 
-func (q *PgQueue[T]) setQueueStateInTx(ctx context.Context, tx pgx.Tx, state, reason string) error {
+func (q *PgQueue) setQueueStateInTx(ctx context.Context, tx pgx.Tx, state, reason string) error {
 	var currentState string
 	err := tx.QueryRow(
 		ctx,
@@ -146,7 +146,7 @@ func (q *PgQueue[T]) setQueueStateInTx(ctx context.Context, tx pgx.Tx, state, re
 }
 
 // Pause marks the queue as paused and records the state change.
-func (q *PgQueue[T]) Pause(ctx context.Context) error {
+func (q *PgQueue) Pause(ctx context.Context) error {
 	if err := q.setQueueState(ctx, "paused", ""); err != nil {
 		return fmt.Errorf("pause queue %s: %w", q.QueueName, err)
 	}
@@ -154,7 +154,7 @@ func (q *PgQueue[T]) Pause(ctx context.Context) error {
 }
 
 // Resume marks the queue as active and records the state change.
-func (q *PgQueue[T]) Resume(ctx context.Context) error {
+func (q *PgQueue) Resume(ctx context.Context) error {
 	if err := q.setQueueState(ctx, "active", ""); err != nil {
 		return fmt.Errorf("resume queue %s: %w", q.QueueName, err)
 	}
@@ -162,7 +162,7 @@ func (q *PgQueue[T]) Resume(ctx context.Context) error {
 }
 
 // IsPaused reports whether the queue is currently paused.
-func (q *PgQueue[T]) IsPaused(ctx context.Context) (bool, error) {
+func (q *PgQueue) IsPaused(ctx context.Context) (bool, error) {
 	state, err := q.getQueueState(ctx)
 	if err != nil {
 		return false, fmt.Errorf("check queue paused state %s: %w", q.QueueName, err)
@@ -171,7 +171,7 @@ func (q *PgQueue[T]) IsPaused(ctx context.Context) (bool, error) {
 }
 
 // Drain deletes all queue entries and leaves the queue paused.
-func (q *PgQueue[T]) Drain(ctx context.Context) error {
+func (q *PgQueue) Drain(ctx context.Context) error {
 	tx, txCtx, cancel, err := q.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("begin drain for %s: %w", q.QueueName, err)
@@ -195,7 +195,7 @@ func (q *PgQueue[T]) Drain(ctx context.Context) error {
 }
 
 // Enqueue inserts a queue entry into the queue table within the given transaction.
-func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
+func (q *PgQueue) Enqueue(task Task, tx pgx.Tx) error { //nolint:gocritic // Phase 018 standardizes the public queue API on Task values.
 	state, err := q.getQueueState(q.Ctx)
 	if err != nil {
 		return fmt.Errorf("enqueue %s: check queue state: %w", q.QueueName, err)
@@ -205,11 +205,6 @@ func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
 		return fmt.Errorf("enqueue %s: %w", q.QueueName, ErrQueuePaused)
 	case "draining":
 		return fmt.Errorf("enqueue %s: %w", q.QueueName, ErrQueueDraining)
-	}
-
-	entry, ok := interface{}(&item).(IQueueEntry)
-	if !ok {
-		return fmt.Errorf("item does not implement BaseQueueEntry")
 	}
 
 	query := psql.Insert(
@@ -228,15 +223,15 @@ func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
 			"updated_at",
 		),
 		im.Values(psql.Arg(
-			entry.GetBaseQueueEntry().ID,
-			entry.GetBaseQueueEntry().Data,
-			entry.GetBaseQueueEntry().Status,
-			entry.GetBaseQueueEntry().IsRetry,
-			entry.GetBaseQueueEntry().Retries,
-			entry.GetBaseQueueEntry().RetryPolicy,
-			entry.GetBaseQueueEntry().NextRunAt,
-			entry.GetBaseQueueEntry().LastRunAt,
-			entry.GetBaseQueueEntry().ProcessedAt,
+			task.ID,
+			task.Data,
+			task.Status,
+			task.IsRetry,
+			task.Retries,
+			task.RetryPolicy,
+			task.NextRunAt,
+			task.LastRunAt,
+			task.ProcessedAt,
 			psql.Raw("NOW()"),
 			psql.Raw("NOW()"),
 		)),
@@ -256,7 +251,7 @@ func (q *PgQueue[T]) Enqueue(item T, tx pgx.Tx) error {
 }
 
 // Dequeue claims up to batchSize pending tasks atomically, setting them to RUNNING.
-func (q *PgQueue[T]) Dequeue(batchSize int) (tasks []T, err error) {
+func (q *PgQueue) Dequeue(batchSize int) (tasks []Task, err error) {
 	state, err := q.getQueueState(q.Ctx)
 	if err != nil {
 		return nil, fmt.Errorf("dequeue %s: check queue state: %w", q.QueueName, err)
@@ -300,7 +295,7 @@ func (q *PgQueue[T]) Dequeue(batchSize int) (tasks []T, err error) {
 	}
 	defer rows.Close()
 
-	tasks, err = pgx.CollectRows(rows, pgx.RowToStructByName[T])
+	tasks, err = pgx.CollectRows(rows, pgx.RowToStructByName[Task])
 	if err != nil {
 		return nil, fmt.Errorf("unable to collect rows: %w", err)
 	}
@@ -312,25 +307,20 @@ func (q *PgQueue[T]) Dequeue(batchSize int) (tasks []T, err error) {
 }
 
 // UpdateEntry persists changes to a queue entry within the given transaction.
-func (q *PgQueue[T]) UpdateEntry(item T, tx pgx.Tx, conditions ...Condition) error {
-	entry, ok := interface{}(&item).(IQueueEntry)
-	if !ok {
-		return fmt.Errorf("item does not implement GetBaseQueueEntry")
-	}
-
+func (q *PgQueue) UpdateEntry(task Task, tx pgx.Tx, conditions ...Condition) error { //nolint:gocritic // Phase 018 standardizes the public queue API on Task values.
 	query := psql.Update(
 		um.Table(q.queueTable()),
-		um.SetCol("status").ToArg(entry.GetBaseQueueEntry().Status),
-		um.SetCol("is_retry").ToArg(entry.GetBaseQueueEntry().IsRetry),
-		um.SetCol("retries").ToArg(entry.GetBaseQueueEntry().Retries),
-		um.SetCol("retry_policy").ToArg(entry.GetBaseQueueEntry().RetryPolicy),
-		um.SetCol("next_run_at").ToArg(entry.GetBaseQueueEntry().NextRunAt),
-		um.SetCol("last_run_at").ToArg(entry.GetBaseQueueEntry().LastRunAt),
-		um.SetCol("processed_at").ToArg(entry.GetBaseQueueEntry().ProcessedAt),
+		um.SetCol("status").ToArg(task.Status),
+		um.SetCol("is_retry").ToArg(task.IsRetry),
+		um.SetCol("retries").ToArg(task.Retries),
+		um.SetCol("retry_policy").ToArg(task.RetryPolicy),
+		um.SetCol("next_run_at").ToArg(task.NextRunAt),
+		um.SetCol("last_run_at").ToArg(task.LastRunAt),
+		um.SetCol("processed_at").ToArg(task.ProcessedAt),
 		um.SetCol("updated_at").To(psql.Raw("NOW()")),
 	)
 
-	idCond := IDEquals(entry.GetBaseQueueEntry().ID)
+	idCond := IDEquals(task.ID)
 	idCond.ApplyToUpdate(query)
 
 	for _, cond := range conditions {
@@ -350,7 +340,7 @@ func (q *PgQueue[T]) UpdateEntry(item T, tx pgx.Tx, conditions ...Condition) err
 }
 
 // CheckCondition returns true when at least one row matches all conditions.
-func (q *PgQueue[T]) CheckCondition(ctx context.Context, tx pgx.Tx, conditions ...Condition) (bool, error) {
+func (q *PgQueue) CheckCondition(ctx context.Context, tx pgx.Tx, conditions ...Condition) (bool, error) {
 	query := psql.Select(
 		sm.From(q.queueTable()),
 		sm.Columns("1"),
@@ -383,7 +373,7 @@ func (q *PgQueue[T]) CheckCondition(ctx context.Context, tx pgx.Tx, conditions .
 // scan is called once per row; returning an error stops iteration immediately.
 // All filtering, ordering, and column selection is expressed as SelectMods
 // (e.g. sm.Where, sm.OrderBy, sm.Limit, sm.Columns).
-func (q *PgQueue[T]) Select(
+func (q *PgQueue) Select(
 	ctx context.Context,
 	scan func(pgx.Rows) error,
 	mods ...SelectMod,
@@ -421,7 +411,7 @@ func (q *PgQueue[T]) Select(
 // Returns (true, nil) when a row was found, (false, nil) when none matched.
 // scan receives a pgx.Rows already positioned on the row — call rows.Scan()
 // directly inside it.
-func (q *PgQueue[T]) SelectOne(
+func (q *PgQueue) SelectOne(
 	ctx context.Context,
 	scan func(pgx.Rows) error,
 	mods ...SelectMod,
@@ -439,7 +429,7 @@ func (q *PgQueue[T]) SelectOne(
 }
 
 // UpdateStatus sets the status column for rows matching the given conditions.
-func (q *PgQueue[T]) UpdateStatus(ctx context.Context, tx pgx.Tx, status string, conditions ...Condition) error {
+func (q *PgQueue) UpdateStatus(ctx context.Context, tx pgx.Tx, status string, conditions ...Condition) error {
 	query := psql.Update(
 		um.Table(q.queueTable()),
 		um.SetCol("status").ToArg(status),
@@ -465,7 +455,7 @@ func (q *PgQueue[T]) UpdateStatus(ctx context.Context, tx pgx.Tx, status string,
 
 // NewPgQueue validates its inputs and constructs a PgQueue. A non-nil error is
 // returned when any required argument is missing or the retry policy is invalid.
-func NewPgQueue[T interface{}](ctx context.Context, pool *pgxpool.Pool, queueName string, retryPolicy *RetryPolicy, opts ...PgQueueOption) (*PgQueue[T], error) {
+func NewPgQueue(ctx context.Context, pool *pgxpool.Pool, queueName string, retryPolicy *RetryPolicy, opts ...PgQueueOption) (*PgQueue, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("liteq: NewPgQueue: ctx must not be nil")
 	}
@@ -518,7 +508,7 @@ func NewPgQueue[T interface{}](ctx context.Context, pool *pgxpool.Pool, queueNam
 		}
 	}
 
-	return &PgQueue[T]{
+	return &PgQueue{
 		BaseQueue: BaseQueue{
 			Ctx:         ctx,
 			Schema:      cfg.schema,
@@ -532,7 +522,7 @@ func NewPgQueue[T interface{}](ctx context.Context, pool *pgxpool.Pool, queueNam
 
 // GetRetryPolicy returns the queue's retry policy, loading it from the database
 // on first access if no static policy was provided at construction time.
-func (q *PgQueue[T]) GetRetryPolicy(ctx context.Context) (*RetryPolicy, error) {
+func (q *PgQueue) GetRetryPolicy(ctx context.Context) (*RetryPolicy, error) {
 	if q.RetryPolicy != nil {
 		return q.RetryPolicy, nil
 	}
@@ -542,7 +532,7 @@ func (q *PgQueue[T]) GetRetryPolicy(ctx context.Context) (*RetryPolicy, error) {
 	return q.retryPolicyVal, q.retryPolicyErr
 }
 
-func (q *PgQueue[T]) loadRetryPolicy(ctx context.Context) (*RetryPolicy, error) {
+func (q *PgQueue) loadRetryPolicy(ctx context.Context) (*RetryPolicy, error) {
 	var rawPolicy []byte
 	err := q.Pool.QueryRow(
 		ctx,
