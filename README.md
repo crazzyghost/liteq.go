@@ -50,12 +50,12 @@ Tasks are rows in a Postgres table. Workers poll for available tasks, process th
 ## Install
 
 ```bash
-go get liteq.go@latest
+go get github.com/crazzyghost/liteq.go@latest
 ```
 
 **CLI (optional):**
 ```bash
-go install liteq.go/cmd/lq@latest
+go install github.com/crazzyghost/liteq.go/cmd/lq@latest
 ```
 
 **Requirements:** Go 1.25+ • PostgreSQL 12+
@@ -70,7 +70,7 @@ lq queue create email_jobs  # Creates email_jobs + email_jobs_dead_letter
 
 **2. Enqueue a task**
 ```go
-import lq "liteq.go"
+import lq "github.com/crazzyghost/liteq.go"
 
 pool, _ := pgxpool.New(ctx, os.Getenv("LITEQ_DATABASE_URL"))
 jobs, _ := lq.NewPgQueue(ctx, pool, "email_jobs", &lq.RetryPolicy{

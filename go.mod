@@ -1,4 +1,4 @@
-module liteq.go
+module github.com/crazzyghost/liteq.go
 
 go 1.25
 

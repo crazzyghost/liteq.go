@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	liteq "liteq.go"
+	liteq "github.com/crazzyghost/liteq.go"
 )
 
 type stubMigrator struct {
