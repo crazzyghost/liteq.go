@@ -20,7 +20,8 @@ vet:
 check: lint test build
 
 install:
-	go install ./cmd/lq
+	@VERSION=$$(git describe --tags --always 2>/dev/null || echo "dev"); \
+	go install -ldflags="-X main.version=$$VERSION" ./cmd/lq
 
 release-dry:
 	goreleaser release --snapshot --clean
