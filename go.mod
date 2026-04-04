@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	github.com/jackc/pgx/v5 v5.8.0
+	github.com/spf13/pflag v1.0.10
 	github.com/stephenafamo/bob v0.42.0
 )
 

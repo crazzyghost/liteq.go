@@ -330,6 +330,113 @@ func TestSelectRollbackBatches_MultipleBatches(t *testing.T) {
 	}
 }
 
+func TestSelectQueueRollbackBatches_ExcludesFoundationAndKeepsBatchPeers(t *testing.T) {
+	applied := []migrationRecord{
+		{Name: "001_create_queue_table", Version: "v1", QueueName: "q3_dead_letter", Batch: 4},
+		{Name: "001_create_queue_table", Version: "v1", QueueName: "q3", Batch: 4},
+		{Name: "001_create_queue_table", Version: "v1", QueueName: "q2_dead_letter", Batch: 3},
+		{Name: "001_create_queue_table", Version: "v1", QueueName: "q2", Batch: 3},
+		{Name: "001_create_queue_table", Version: "v1", QueueName: "q1_dead_letter", Batch: 2},
+		{Name: "001_create_queue_table", Version: "v1", QueueName: "q1", Batch: 2},
+		{Name: "000_create_schema", Version: "v1", QueueName: "", Batch: 1},
+	}
+
+	got := selectQueueRollbackBatches(applied, "q1", 1)
+	if len(got) != 2 {
+		t.Fatalf("rollback count = %d, want 2", len(got))
+	}
+	for _, record := range got {
+		if record.Batch != 2 {
+			t.Fatalf("record = %#v, want batch 2", record)
+		}
+		if record.Name == "000_create_schema" {
+			t.Fatalf("record = %#v, foundation should not be included", record)
+		}
+	}
+}
+
+func TestSchemaManager_NormalizeQueueTargets_DisableDLQSkipsDefault(t *testing.T) {
+	sm := NewSchemaManager(nil)
+
+	targets, err := sm.normalizeQueueTargets([]QueueDefinition{{
+		Name:       "queue_tasks",
+		DisableDLQ: true,
+	}})
+	if err != nil {
+		t.Fatalf("normalizeQueueTargets returned error: %v", err)
+	}
+
+	if len(targets) != 1 || targets[0] != "queue_tasks" {
+		t.Fatalf("targets = %#v, want only queue_tasks", targets)
+	}
+}
+
+func TestSchemaManager_NormalizeQueueTargets_RejectsDisableDLQWithExplicitDLQ(t *testing.T) {
+	sm := NewSchemaManager(nil)
+
+	_, err := sm.normalizeQueueTargets([]QueueDefinition{{
+		Name:       "queue_tasks",
+		DLQName:    "queue_tasks_dlq",
+		DisableDLQ: true,
+	}})
+	if err == nil {
+		t.Fatal("expected error for disable dlq with explicit dlq")
+	}
+	if !strings.Contains(err.Error(), "disable dlq cannot both be set") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSchemaManager_MigrateDownQueueAll_PreservesFoundationAndOtherQueues(t *testing.T) {
+	pool, schema := newIntegrationTestPool(t)
+	ctx := context.Background()
+	manager := NewSchemaManager(pool, WithSchemaManagerSchema(schema))
+
+	if err := manager.EnsureQueue(ctx, "q1", ""); err != nil {
+		t.Fatalf("EnsureQueue(q1): %v", err)
+	}
+	if err := manager.EnsureQueue(ctx, "q2", ""); err != nil {
+		t.Fatalf("EnsureQueue(q2): %v", err)
+	}
+
+	if err := manager.MigrateDownQueueAll(ctx, "q1"); err != nil {
+		t.Fatalf("MigrateDownQueueAll(q1): %v", err)
+	}
+
+	for _, relation := range []string{
+		qualifyIdentifier(schema, "queue_meta"),
+		qualifyIdentifier(schema, "queue_states"),
+		qualifyIdentifier(schema, "migrations"),
+		qualifyIdentifier(schema, "schema_versions"),
+		qualifyIdentifier(schema, "q2"),
+	} {
+		var regclass *string
+		if err := pool.QueryRow(ctx, "SELECT to_regclass($1)", relation).Scan(&regclass); err != nil {
+			t.Fatalf("to_regclass(%q): %v", relation, err)
+		}
+		if regclass == nil {
+			t.Fatalf("relation %q should still exist", relation)
+		}
+	}
+
+	for _, relation := range []string{
+		qualifyIdentifier(schema, "q1"),
+		qualifyIdentifier(schema, "q1_dead_letter"),
+	} {
+		var regclass *string
+		if err := pool.QueryRow(ctx, "SELECT to_regclass($1)", relation).Scan(&regclass); err != nil {
+			t.Fatalf("to_regclass(%q): %v", relation, err)
+		}
+		if regclass != nil {
+			t.Fatalf("relation %q should have been removed, got %q", relation, *regclass)
+		}
+	}
+
+	if got := countRowsForQueue(t, pool, qualifyIdentifier(schema, "queue_meta"), "q2"); got != 1 {
+		t.Fatalf("queue_meta rows for q2 = %d, want 1", got)
+	}
+}
+
 func TestSchemaManager_EnsureSchema_NilPool(t *testing.T) {
 	sm := NewSchemaManager(nil)
 	err := sm.EnsureSchema(context.Background())

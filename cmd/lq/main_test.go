@@ -5,14 +5,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	liteq "liteq.go"
 )
 
 type stubMigrator struct {
-	migrateFn        func(context.Context, []liteq.QueueDefinition) error
-	migrateDownFn    func(context.Context, int) error
-	migrateDownAllFn func(context.Context) error
+	migrateFn             func(context.Context, []liteq.QueueDefinition) error
+	migrateWithStatusFn   func(context.Context, []liteq.QueueDefinition) (bool, error)
+	migrateDownFn         func(context.Context, int) error
+	migrateDownAllFn      func(context.Context) error
+	migrateDownQueueFn    func(context.Context, string, int) error
+	migrateDownQueueAllFn func(context.Context, string) error
 }
 
 func (s *stubMigrator) Migrate(ctx context.Context, queues []liteq.QueueDefinition) error {
@@ -21,6 +23,17 @@ func (s *stubMigrator) Migrate(ctx context.Context, queues []liteq.QueueDefiniti
 	}
 
 	return nil
+}
+
+func (s *stubMigrator) MigrateWithStatus(ctx context.Context, queues []liteq.QueueDefinition) (bool, error) {
+	if s.migrateWithStatusFn != nil {
+		return s.migrateWithStatusFn(ctx, queues)
+	}
+	if s.migrateFn != nil {
+		return true, s.migrateFn(ctx, queues)
+	}
+
+	return true, nil
 }
 
 func (s *stubMigrator) MigrateDown(ctx context.Context, steps int) error {
@@ -39,21 +52,23 @@ func (s *stubMigrator) MigrateDownAll(ctx context.Context) error {
 	return nil
 }
 
-func TestVersion_SubcommandVersion(t *testing.T) {
-	var stdout, stderr strings.Builder
-	exitCode := run(context.Background(), []string{"version"}, &stdout, &stderr)
-
-	if exitCode != 0 {
-		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+func (s *stubMigrator) MigrateDownQueue(ctx context.Context, queueName string, steps int) error {
+	if s.migrateDownQueueFn != nil {
+		return s.migrateDownQueueFn(ctx, queueName, steps)
 	}
 
-	want := "lq dev\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
-	}
+	return nil
 }
 
-func TestVersion_FlagVersion(t *testing.T) {
+func (s *stubMigrator) MigrateDownQueueAll(ctx context.Context, queueName string) error {
+	if s.migrateDownQueueAllFn != nil {
+		return s.migrateDownQueueAllFn(ctx, queueName)
+	}
+
+	return nil
+}
+
+func TestVersionFlag(t *testing.T) {
 	var stdout, stderr strings.Builder
 	exitCode := run(context.Background(), []string{"--version"}, &stdout, &stderr)
 
@@ -61,207 +76,208 @@ func TestVersion_FlagVersion(t *testing.T) {
 		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
 	}
 
-	want := "lq dev\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	if stdout.String() != "lq dev\n" {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), "lq dev\n")
 	}
 }
 
-func TestVersion_InjectedVersion(t *testing.T) {
+func TestVersionFlag_InjectedVersion(t *testing.T) {
 	orig := version
 	version = "v1.2.3"
 	t.Cleanup(func() { version = orig })
 
 	var stdout, stderr strings.Builder
+	exitCode := run(context.Background(), []string{"--version"}, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+
+	if stdout.String() != "lq v1.2.3\n" {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), "lq v1.2.3\n")
+	}
+}
+
+func TestRun_VersionSubcommand_IsUnknown(t *testing.T) {
+	var stdout, stderr strings.Builder
 	exitCode := run(context.Background(), []string{"version"}, &stdout, &stderr)
 
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "unknown command: version") {
+		t.Fatalf("stderr = %q, want unknown version command error", stderr.String())
+	}
+}
+
+func TestRun_MigrateUp_IsUnknown(t *testing.T) {
+	var stdout, stderr strings.Builder
+	exitCode := run(context.Background(), []string{"migrate-up"}, &stdout, &stderr)
+
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "unknown command: migrate-up") {
+		t.Fatalf("stderr = %q, want unknown migrate-up command error", stderr.String())
+	}
+}
+
+func TestRun_MigrateDown_IsUnknown(t *testing.T) {
+	var stdout, stderr strings.Builder
+	exitCode := run(context.Background(), []string{"migrate-down"}, &stdout, &stderr)
+
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "unknown command: migrate-down") {
+		t.Fatalf("stderr = %q, want unknown migrate-down command error", stderr.String())
+	}
+}
+
+func TestRun_NoArgs_PrintsUsage(t *testing.T) {
+	var stdout, stderr strings.Builder
+	exitCode := run(context.Background(), nil, &stdout, &stderr)
+
+	if exitCode != 1 {
+		t.Fatalf("exit code = %d, want 1", exitCode)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Usage:") {
+		t.Fatalf("stderr = %q, want usage text", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "error: command is required") {
+		t.Fatalf("stderr = %q, want command is required error", stderr.String())
+	}
+}
+
+func TestRun_Help_Flag(t *testing.T) {
+	var stdout, stderr strings.Builder
+	exitCode := run(context.Background(), []string{"--help"}, &stdout, &stderr)
+
 	if exitCode != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
 	}
-
-	want := "lq v1.2.3\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "lq — Postgres-backed queue management CLI") {
+		t.Fatalf("stdout = %q, want root help", stdout.String())
 	}
 }
 
-func TestRun_MigrateUpDryRunDoesNotRequireDatabaseURL(t *testing.T) {
-	origNewPool := newPool
-	origNewSchemaMigrator := newSchemaMigrator
-
-	t.Cleanup(func() {
-		newPool = origNewPool
-		newSchemaMigrator = origNewSchemaMigrator
-	})
-
-	newPoolCalled := false
-	newPool = func(context.Context, string) (*pgxpool.Pool, error) {
-		newPoolCalled = true
-		return nil, nil
-	}
-
-	var gotQueues []liteq.QueueDefinition
-
-	var gotOpts int
-
-	newSchemaMigrator = func(pool *pgxpool.Pool, opts ...liteq.SchemaManagerOption) schemaMigrator {
-		if pool != nil {
-			t.Fatalf("expected nil pool for dry-run migrate-up, got %#v", pool)
-		}
-
-		gotOpts = len(opts)
-
-		return &stubMigrator{migrateFn: func(_ context.Context, queues []liteq.QueueDefinition) error {
-			gotQueues = queues
-			return nil
-		}}
-	}
-
+func TestRun_Help_ShortFlag(t *testing.T) {
 	var stdout, stderr strings.Builder
-	exitCode := run(context.Background(), []string{"migrate-up", "--dry-run", "--queues", "queue_tasks:queue_tasks_dead_letter"}, &stdout, &stderr)
+	exitCode := run(context.Background(), []string{"-h"}, &stdout, &stderr)
 
 	if exitCode != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
 	}
-
-	if newPoolCalled {
-		t.Fatal("expected migrate-up dry-run to avoid creating a pool")
-	}
-
-	if gotOpts != 2 {
-		t.Fatalf("option count = %d, want 2", gotOpts)
-	}
-
-	if len(gotQueues) != 1 {
-		t.Fatalf("queue count = %d, want 1", len(gotQueues))
-	}
-
-	if gotQueues[0].Name != "queue_tasks" || gotQueues[0].DLQName != "queue_tasks_dead_letter" {
-		t.Fatalf("queues = %#v, want queue_tasks:queue_tasks_dead_letter", gotQueues)
+	if !strings.Contains(stdout.String(), "Usage:") {
+		t.Fatalf("stdout = %q, want usage text", stdout.String())
 	}
 }
 
-func TestRun_MigrateDownDryRunRequiresDatabaseURL(t *testing.T) {
+func TestRun_Help_Subcommand(t *testing.T) {
 	var stdout, stderr strings.Builder
-	exitCode := run(context.Background(), []string{"migrate-down", "--dry-run"}, &stdout, &stderr)
+	exitCode := run(context.Background(), []string{"help"}, &stdout, &stderr)
 
-	if exitCode == 0 {
-		t.Fatal("expected non-zero exit code")
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
 	}
-
-	if !strings.Contains(stderr.String(), "migrate-down dry-run requires a database connection") {
-		t.Fatalf("stderr = %q, want migrate-down dry-run guidance", stderr.String())
+	if !strings.Contains(stdout.String(), "Commands:") {
+		t.Fatalf("stdout = %q, want commands section", stdout.String())
 	}
 }
 
-func TestRun_MigrateDownAllUsesEnvironmentDatabaseURL(t *testing.T) {
-	origNewPool := newPool
-	origNewSchemaMigrator := newSchemaMigrator
-
-	t.Cleanup(func() {
-		newPool = origNewPool
-		newSchemaMigrator = origNewSchemaMigrator
-	})
-
-	t.Setenv("DATABASE_URL", "postgres://env-user:env-pass@localhost:5432/liteq")
-
-	var gotDatabaseURL string
-
-	newPool = func(_ context.Context, databaseURL string) (*pgxpool.Pool, error) {
-		gotDatabaseURL = databaseURL
-		return nil, nil
-	}
-
-	calledDownAll := false
-
-	newSchemaMigrator = func(pool *pgxpool.Pool, opts ...liteq.SchemaManagerOption) schemaMigrator {
-		if pool != nil {
-			t.Fatalf("expected nil test pool, got %#v", pool)
-		}
-
-		if len(opts) != 1 {
-			t.Fatalf("option count = %d, want 1", len(opts))
-		}
-
-		return &stubMigrator{migrateDownAllFn: func(context.Context) error {
-			calledDownAll = true
-			return nil
-		}}
-	}
-
+func TestRun_Help_ContainsAllCommands(t *testing.T) {
 	var stdout, stderr strings.Builder
-	exitCode := run(context.Background(), []string{"migrate-down", "--steps", "all"}, &stdout, &stderr)
+	exitCode := run(context.Background(), []string{"--help"}, &stdout, &stderr)
 
 	if exitCode != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
 	}
 
-	if gotDatabaseURL != "postgres://env-user:env-pass@localhost:5432/liteq" {
-		t.Fatalf("database url = %q", gotDatabaseURL)
-	}
-
-	if !calledDownAll {
-		t.Fatal("expected MigrateDownAll to be called")
+	for _, want := range []string{"create", "rm", "ls", "pause", "resume", "drain", "history"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, want command %q", stdout.String(), want)
+		}
 	}
 }
 
-func TestParseQueueDefinitions(t *testing.T) {
-	queues, err := parseQueueDefinitions("queue_tasks:queue_tasks_dead_letter, queue_scheduled:queue_scheduled_dead_letter")
-	if err != nil {
-		t.Fatalf("parseQueueDefinitions returned error: %v", err)
+func TestRun_Help_ContainsEnvVars(t *testing.T) {
+	var stdout, stderr strings.Builder
+	exitCode := run(context.Background(), []string{"--help"}, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
 	}
 
-	if len(queues) != 2 {
-		t.Fatalf("queue count = %d, want 2", len(queues))
-	}
-
-	if queues[1].Name != "queue_scheduled" || queues[1].DLQName != "queue_scheduled_dead_letter" {
-		t.Fatalf("queues[1] = %#v", queues[1])
-	}
-}
-
-func TestParseQueueDefinitions_DefaultDLQ(t *testing.T) {
-	queues, err := parseQueueDefinitions("tasks")
-	if err != nil {
-		t.Fatalf("parseQueueDefinitions returned error: %v", err)
-	}
-
-	if len(queues) != 1 {
-		t.Fatalf("queue count = %d, want 1", len(queues))
-	}
-
-	if queues[0].Name != "tasks" {
-		t.Fatalf("queue name = %q, want %q", queues[0].Name, "tasks")
-	}
-
-	if queues[0].DLQName != "" {
-		t.Fatalf("dlq name = %q, want empty for defaulting in SchemaManager", queues[0].DLQName)
+	for _, want := range []string{"LITEQ_DATABASE_URL", "LITEQ_SCHEMA"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, want env var %q", stdout.String(), want)
+		}
 	}
 }
 
-func TestParseQueueDefinitions_RejectsEmptyQueueName(t *testing.T) {
-	_, err := parseQueueDefinitions(":tasks_dead_letter")
-	if err == nil {
-		t.Fatal("expected error for empty queue name")
-	}
+func TestResolveDatabaseURL_PrefersFlag(t *testing.T) {
+	t.Setenv("LITEQ_DATABASE_URL", "postgres://env")
 
-	if !strings.Contains(err.Error(), "queue name must not be empty") {
-		t.Fatalf("err = %v", err)
+	got := resolveDatabaseURL("postgres://flag")
+
+	if got != "postgres://flag" {
+		t.Fatalf("resolveDatabaseURL() = %q, want %q", got, "postgres://flag")
 	}
 }
 
-func TestParseStepsRejectsInvalidValues(t *testing.T) {
-	t.Parallel()
+func TestResolveDatabaseURL_FallsBackToEnv(t *testing.T) {
+	t.Setenv("LITEQ_DATABASE_URL", "postgres://env")
 
-	for _, value := range []string{"0", "-1", "abc"} {
-		value := value
-		t.Run(value, func(t *testing.T) {
-			t.Parallel()
+	got := resolveDatabaseURL("")
 
-			_, _, err := parseSteps(value)
-			if err == nil {
-				t.Fatalf("parseSteps(%q) returned nil error", value)
-			}
-		})
+	if got != "postgres://env" {
+		t.Fatalf("resolveDatabaseURL() = %q, want %q", got, "postgres://env")
+	}
+}
+
+func TestResolveDatabaseURL_ReturnsEmptyWhenNoneSet(t *testing.T) {
+	t.Setenv("LITEQ_DATABASE_URL", "")
+	t.Setenv("DATABASE_URL", "postgres://legacy")
+
+	got := resolveDatabaseURL("")
+
+	if got != "" {
+		t.Fatalf("resolveDatabaseURL() = %q, want empty", got)
+	}
+}
+
+func TestResolveSchema_PrefersFlag(t *testing.T) {
+	t.Setenv("LITEQ_SCHEMA", "env_schema")
+
+	got := resolveSchema("flag_schema")
+
+	if got != "flag_schema" {
+		t.Fatalf("resolveSchema() = %q, want %q", got, "flag_schema")
+	}
+}
+
+func TestResolveSchema_FallsBackToEnv(t *testing.T) {
+	t.Setenv("LITEQ_SCHEMA", "env_schema")
+
+	got := resolveSchema("")
+
+	if got != "env_schema" {
+		t.Fatalf("resolveSchema() = %q, want %q", got, "env_schema")
+	}
+}
+
+func TestResolveSchema_DefaultsToLiteq(t *testing.T) {
+	t.Setenv("LITEQ_SCHEMA", "")
+
+	got := resolveSchema("")
+
+	if got != "liteq" {
+		t.Fatalf("resolveSchema() = %q, want %q", got, "liteq")
 	}
 }

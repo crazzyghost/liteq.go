@@ -21,10 +21,11 @@ var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
 const maxRollbackSteps = int(^uint(0) >> 1)
 
-// QueueDefinition specifies a queue and its optional dead-letter queue for migrations.
+// QueueDefinition specifies a queue and its dead-letter queue migration behavior.
 type QueueDefinition struct {
-	Name    string
-	DLQName string
+	Name       string
+	DLQName    string
+	DisableDLQ bool
 }
 
 // SchemaManager handles database migrations for liteq queue tables.
@@ -84,43 +85,51 @@ func NewSchemaManager(pool *pgxpool.Pool, opts ...SchemaManagerOption) *SchemaMa
 
 // Migrate applies all pending up-migrations for the given queue definitions.
 func (sm *SchemaManager) Migrate(ctx context.Context, queues []QueueDefinition) error {
+	_, err := sm.MigrateWithStatus(ctx, queues)
+	return err
+}
+
+// MigrateWithStatus applies all pending up-migrations for the given queue
+// definitions and reports whether any new migration records were applied.
+func (sm *SchemaManager) MigrateWithStatus(ctx context.Context, queues []QueueDefinition) (bool, error) {
 	if err := sm.validate(ctx); err != nil {
-		return err
+		return false, err
 	}
 
 	targets, err := sm.normalizeQueueTargets(queues)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	steps := sm.migrationSteps(targets)
 	if sm.dryRun {
-		return sm.writeDryRunPlan(steps)
+		return len(steps) > 0, sm.writeDryRunPlan(steps)
 	}
 	if sm.pool == nil {
-		return fmt.Errorf("schema manager: pool must not be nil")
+		return false, fmt.Errorf("schema manager: pool must not be nil")
 	}
 
 	tx, err := sm.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("schema manager: begin migration tx: %w", err)
+		return false, fmt.Errorf("schema manager: begin migration tx: %w", err)
 	}
 	defer rollback(tx)
 
 	applied, migrationsExist, err := sm.loadAppliedMigrations(ctx, tx)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	batch := 1
 	if migrationsExist {
 		batch, err = sm.nextBatch(ctx, tx)
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
 
 	pending := make([]migrationRecord, 0, len(steps))
+	appliedAny := false
 
 	for idx, step := range steps {
 		key := step.migrationKey()
@@ -131,14 +140,14 @@ func (sm *SchemaManager) Migrate(ctx context.Context, queues []QueueDefinition) 
 
 		sql, skip, err := sm.renderMigration(step.file, step.queueName)
 		if err != nil {
-			return fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
+			return false, fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
 		}
 		if skip || strings.TrimSpace(sql) == "" {
 			continue
 		}
 
 		if _, err := tx.Exec(ctx, sql); err != nil {
-			return fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
+			return false, fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
 		}
 
 		record := migrationRecord{
@@ -152,12 +161,13 @@ func (sm *SchemaManager) Migrate(ctx context.Context, queues []QueueDefinition) 
 				continue
 			}
 			if err := sm.recordMigration(ctx, tx, record); err != nil {
-				return fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
+				return false, fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
 			}
 			if err := sm.recordSchemaVersion(ctx, tx, record); err != nil {
-				return fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
+				return false, fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
 			}
 			applied[key] = struct{}{}
+			appliedAny = true
 			continue
 		}
 
@@ -166,21 +176,25 @@ func (sm *SchemaManager) Migrate(ctx context.Context, queues []QueueDefinition) 
 			migrationsExist = true
 			for _, pendingRecord := range pending {
 				if err := sm.recordMigration(ctx, tx, pendingRecord); err != nil {
-					return fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
+					return false, fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
 				}
 				if err := sm.recordSchemaVersion(ctx, tx, pendingRecord); err != nil {
-					return fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
+					return false, fmt.Errorf("schema manager: migration %s step %d: %w", step.file, idx+1, err)
 				}
 				applied[pendingRecord.migrationKey()] = struct{}{}
 			}
+			if len(pending) > 0 {
+				appliedAny = true
+			}
 			pending = pending[:0]
+			batch++
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("schema manager: commit migration tx: %w", err)
+		return false, fmt.Errorf("schema manager: commit migration tx: %w", err)
 	}
-	return nil
+	return appliedAny, nil
 }
 
 // MigrateDown rolls back the given number of migration batches.
@@ -219,41 +233,8 @@ func (sm *SchemaManager) MigrateDown(ctx context.Context, steps int) error {
 	}
 
 	plan := selectRollbackBatches(records, steps)
-	migrationsTableDropped := false
-	for idx, record := range plan {
-		file := record.downFile()
-
-		sql, skip, err := sm.renderMigration(file, record.QueueName)
-		if err != nil {
-			return fmt.Errorf("schema manager: migration %s step %d: %w", file, idx+1, err)
-		}
-		if skip || strings.TrimSpace(sql) == "" {
-			continue
-		}
-
-		if sm.dryRun {
-			if err := sm.writeDryRunMigration(file, sql); err != nil {
-				return fmt.Errorf("schema manager: migration %s step %d: %w", file, idx+1, err)
-			}
-			continue
-		}
-
-		if _, err := tx.Exec(ctx, sql); err != nil {
-			return fmt.Errorf("schema manager: migration %s step %d: %w", file, idx+1, err)
-		}
-		if record.Name == "000_create_schema" {
-			migrationsTableDropped = true
-			continue
-		}
-		if migrationsTableDropped {
-			continue
-		}
-		if err := sm.deleteMigration(ctx, tx, record); err != nil {
-			return fmt.Errorf("schema manager: migration %s step %d: %w", file, idx+1, err)
-		}
-		if err := sm.deleteSchemaVersion(ctx, tx, record); err != nil {
-			return fmt.Errorf("schema manager: migration %s step %d: %w", file, idx+1, err)
-		}
+	if err := sm.rollbackRecords(ctx, tx, plan); err != nil {
+		return err
 	}
 
 	if sm.dryRun {
@@ -265,9 +246,63 @@ func (sm *SchemaManager) MigrateDown(ctx context.Context, steps int) error {
 	return nil
 }
 
+// MigrateDownQueue rolls back the given number of migration batches for a single queue.
+func (sm *SchemaManager) MigrateDownQueue(ctx context.Context, queueName string, steps int) error {
+	if err := sm.validate(ctx); err != nil {
+		return err
+	}
+	if err := validateIdentifier("queue name", queueName); err != nil {
+		return fmt.Errorf("schema manager: %w", err)
+	}
+	if steps <= 0 {
+		return fmt.Errorf("schema manager: steps must be greater than zero")
+	}
+	if sm.pool == nil {
+		if sm.dryRun {
+			return fmt.Errorf("schema manager: pool must not be nil for queue migrate-down dry-run; applied migrations must be discovered from the migrations table")
+		}
+		return fmt.Errorf("schema manager: pool must not be nil")
+	}
+
+	tx, err := sm.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("schema manager: begin queue rollback tx: %w", err)
+	}
+	defer rollback(tx)
+
+	records, migrationsExist, err := sm.loadAppliedMigrationRecords(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if !migrationsExist || len(records) == 0 {
+		return fmt.Errorf("queue %q not found", queueName)
+	}
+
+	plan := selectQueueRollbackBatches(records, queueName, steps)
+	if len(plan) == 0 {
+		return fmt.Errorf("queue %q not found", queueName)
+	}
+	if err := sm.rollbackRecords(ctx, tx, plan); err != nil {
+		return err
+	}
+
+	if sm.dryRun {
+		return nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("schema manager: commit queue rollback tx: %w", err)
+	}
+	return nil
+}
+
 // MigrateDownAll rolls back all applied migration batches.
 func (sm *SchemaManager) MigrateDownAll(ctx context.Context) error {
 	return sm.MigrateDown(ctx, maxRollbackSteps)
+}
+
+// MigrateDownQueueAll rolls back all applied migration batches for a single queue.
+func (sm *SchemaManager) MigrateDownQueueAll(ctx context.Context, queueName string) error {
+	return sm.MigrateDownQueue(ctx, queueName, maxRollbackSteps)
 }
 
 // EnsureSchema applies only the foundation migration (schema + migrations table).
@@ -309,7 +344,11 @@ func (sm *SchemaManager) normalizeQueueTargets(queues []QueueDefinition) ([]stri
 		}
 
 		dlqName := queue.DLQName
-		if dlqName == "" {
+		if queue.DisableDLQ {
+			if dlqName != "" {
+				return nil, fmt.Errorf("schema manager: dlq name and disable dlq cannot both be set")
+			}
+		} else if dlqName == "" {
 			dlqName = defaultDeadLetterQueueName(queue.Name)
 		}
 		if dlqName != "" {
@@ -522,6 +561,47 @@ func (sm *SchemaManager) writeDryRunMigration(file, sql string) error {
 	return nil
 }
 
+func (sm *SchemaManager) rollbackRecords(ctx context.Context, tx pgx.Tx, plan []migrationRecord) error {
+	migrationsTableDropped := false
+	for idx, record := range plan {
+		file := record.downFile()
+
+		sql, skip, err := sm.renderMigration(file, record.QueueName)
+		if err != nil {
+			return fmt.Errorf("schema manager: migration %s step %d: %w", file, idx+1, err)
+		}
+		if skip || strings.TrimSpace(sql) == "" {
+			continue
+		}
+
+		if sm.dryRun {
+			if err := sm.writeDryRunMigration(file, sql); err != nil {
+				return fmt.Errorf("schema manager: migration %s step %d: %w", file, idx+1, err)
+			}
+			continue
+		}
+
+		if _, err := tx.Exec(ctx, sql); err != nil {
+			return fmt.Errorf("schema manager: migration %s step %d: %w", file, idx+1, err)
+		}
+		if record.Name == "000_create_schema" {
+			migrationsTableDropped = true
+			continue
+		}
+		if migrationsTableDropped {
+			continue
+		}
+		if err := sm.deleteMigration(ctx, tx, record); err != nil {
+			return fmt.Errorf("schema manager: migration %s step %d: %w", file, idx+1, err)
+		}
+		if err := sm.deleteSchemaVersion(ctx, tx, record); err != nil {
+			return fmt.Errorf("schema manager: migration %s step %d: %w", file, idx+1, err)
+		}
+	}
+
+	return nil
+}
+
 // parseMigrationFile extracts the name and version from a migration filename.
 // "000_create_schema.v1.up.sql" → ("000_create_schema", "v1")
 func parseMigrationFile(file string) (name, version string, err error) {
@@ -599,6 +679,50 @@ func selectRollbackBatches(applied []migrationRecord, steps int) []migrationReco
 
 	// Full rollback: non-foundation first, then foundation last.
 	return append(nonFoundation, foundation...)
+}
+
+func selectQueueRollbackBatches(applied []migrationRecord, queueName string, steps int) []migrationRecord {
+	if steps <= 0 || len(applied) == 0 {
+		return nil
+	}
+
+	seen := make(map[int]struct{})
+	batches := make([]int, 0)
+	for _, record := range applied {
+		if record.Name == "000_create_schema" || record.QueueName != queueName {
+			continue
+		}
+		if _, ok := seen[record.Batch]; ok {
+			continue
+		}
+		seen[record.Batch] = struct{}{}
+		batches = append(batches, record.Batch)
+	}
+
+	if len(batches) == 0 {
+		return nil
+	}
+	if steps > len(batches) {
+		steps = len(batches)
+	}
+
+	rollbackBatches := make(map[int]struct{}, steps)
+	for _, batch := range batches[:steps] {
+		rollbackBatches[batch] = struct{}{}
+	}
+
+	plan := make([]migrationRecord, 0)
+	for _, record := range applied {
+		if record.Name == "000_create_schema" {
+			continue
+		}
+		if _, ok := rollbackBatches[record.Batch]; !ok {
+			continue
+		}
+		plan = append(plan, record)
+	}
+
+	return plan
 }
 
 func defaultDeadLetterQueueName(name string) string {
