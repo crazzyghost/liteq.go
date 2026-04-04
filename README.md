@@ -1,5 +1,7 @@
 # liteq
 
+[![CI](https://github.com/crazzyghost/liteq.go/actions/workflows/ci.yml/badge.svg)](https://github.com/crazzyghost/liteq.go/actions/workflows/ci.yml)
+
 **A PostgreSQL-backed task queue for Go that eliminates extra infrastructure.**
 
 If your app already runs on Postgres, liteq gives you background jobs, retries, dead-letter queues, and operational controls—without Redis, brokers, or coordination services.
