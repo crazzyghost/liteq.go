@@ -53,7 +53,25 @@ Tasks are rows in a Postgres table. Workers poll for available tasks, process th
 go get github.com/crazzyghost/liteq.go@latest
 ```
 
-**CLI (optional):**
+**CLI:**
+
+Download pre-built binary from [GitHub Releases](https://github.com/crazzyghost/liteq.go/releases):
+
+```bash
+# macOS (Apple Silicon)
+curl -sL https://github.com/crazzyghost/liteq.go/releases/download/<version>/lq_darwin_arm64.tar.gz | tar xz
+sudo mv lq /usr/local/bin/
+
+# macOS (Intel)
+curl -sL https://github.com/crazzyghost/liteq.go/releases/download/<version>/lq_darwin_amd64.tar.gz | tar xz
+sudo mv lq /usr/local/bin/
+
+# Linux (x86_64)
+curl -sL https://github.com/crazzyghost/liteq.go/releases/download/<version>/lq_linux_amd64.tar.gz | tar xz
+sudo mv lq /usr/local/bin/
+```
+
+Or install from source:
 ```bash
 go install github.com/crazzyghost/liteq.go/cmd/lq@latest
 ```
