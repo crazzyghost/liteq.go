@@ -23,14 +23,14 @@ Create queues, pause traffic, drain backlogs, inspect history—all from your te
 
 ## When to use liteq
 
-✅ **Good fit:**
+**Good fit:**
 - You're already on PostgreSQL and want to avoid adding Redis/RabbitMQ
 - You need reliable background jobs with retries and dead-letter handling
 - You want transactional task enqueue (task commits only if your transaction commits)
 - You value operational simplicity and SQL-based debugging
 - You need cross-language support (any language with a Postgres driver can implement the [protocol spec](spec/))
 
-❌ **Not a fit:**
+**Not a fit:**
 - You need advanced routing patterns (topic exchanges, fanout, priority queues)
 - You're pushing extreme throughput and latency is critical (sub-millisecond response times)
 - You already have a mature Redis/SQS setup with no operational pain
