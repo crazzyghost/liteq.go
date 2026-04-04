@@ -7,7 +7,7 @@ native columns.
 ## Versioning
 
 - Protocol artifact: `liteq.queue-entry.v1`
-- Schema source of truth: `schema/002_create_queue_table.up.sql`
+- Schema source of truth: `schema/001_create_queue_table.v1.up.sql`
 - Release binding: the containing liteq release tag is the authoritative version
   for this document and its companion SQL contracts
 
@@ -46,7 +46,7 @@ clients, ORM models, and migration tooling operate on the persisted schema.
     "data": {
       "type": "object",
       "default": {},
-      "description": "Application payload stored as JSONB."
+      "description": "Application payload stored as JSONB. Go implementation uses interface{} allowing any JSON-serializable type, though object shape is recommended for interoperability."
     },
     "status": {
       "type": "string",
@@ -220,6 +220,8 @@ Operational notes:
 - `DLQ_FAILED` is a terminal recovery state used when DLQ enqueue retries are
   exhausted.
 
+For queue-level lifecycle hooks and state management, see [`queue-lifecycle.md`](./queue-lifecycle.md).
+
 ## Retry Policy Sub-Schema
 
 `retry_policy` is stored as JSONB and matches the Go `RetryPolicy` type:
@@ -233,8 +235,11 @@ Operational notes:
 
 ## Go Compatibility Notes
 
-- `Task` is the primary Go row model for queue APIs.
-- `BaseQueueEntry` models the same persisted fields as deprecated compatibility data.
+- `Task` is the primary and canonical Go row model for queue APIs.
 - SQL column names remain the protocol source of truth.
-- Some Go JSON tags use camelCase while audit timestamps use snake_case; client
-  libraries should normalize names deliberately rather than infer them.
+- Go JSON tags use camelCase for business fields (`isRetry`, `retryPolicy`, `nextRunAt`, 
+  `lastRunAt`, `processedAt`) and snake_case for audit timestamps (`enqueued_at`, 
+  `dequeued_at`, `created_at`, `updated_at`, `deleted_at`). Client libraries should 
+  normalize names deliberately rather than infer them.
+- `QueueData` is defined as `interface{}` in Go, allowing any JSON-serializable type,
+  though object shapes are recommended for cross-language compatibility.

@@ -7,7 +7,9 @@ driver.
 
 ## Shared Conventions
 
-- Queue tables use the schema from `schema/002_create_queue_table.up.sql`.
+- Queue tables use the schema from `schema/001_create_queue_table.v1.up.sql`.
+- Foundation schema (migrations tracking, queue_meta, queue_states) is defined in 
+  `schema/000_create_schema.v1.up.sql`.
 - `{schema}` and `{queue}` are validated identifiers, not user-provided SQL.
 - Parameter placeholders are shown in Postgres `$1`, `$2`, ... form.
 - `READ COMMITTED` is sufficient for queue claims because `FOR UPDATE SKIP LOCKED`
@@ -43,6 +45,10 @@ deleted_at TIMESTAMPTZ
 | `check_condition` | No | Check whether any row satisfies a predicate. |
 | `select` | No | Query rows with arbitrary filters, ordering, and limit. |
 | `get_retry_policy` | No | Fetch queue-level retry policy from `queue_meta`. |
+| `pause_queue` | Yes | Set queue state to `paused` and audit change. |
+| `resume_queue` | Yes | Set queue state to `active` and audit change. |
+| `is_paused` | No | Check current queue state. |
+| `drain_queue` | Yes | Soft-delete all entries and set state to `draining`. |
 
 ## 1. `enqueue`
 
@@ -80,9 +86,10 @@ INSERT INTO {schema}.{queue} (
 
 ## 2. `enqueue_many`
 
-`enqueue_many` is the batch form of `enqueue`. liteq does not currently expose a
-separate Go method for it, but the protocol contract supports batching so other
-clients can avoid N round trips.
+`enqueue_many` is the batch form of `enqueue`. The Go `PgQueue` implementation does 
+not currently expose a public `EnqueueMany` method—applications must loop over 
+`Enqueue` calls within a transaction. However, the protocol contract supports batching 
+so other language clients can implement batch inserts to avoid N round trips.
 
 ```sql
 INSERT INTO {schema}.{queue} (
@@ -230,6 +237,114 @@ SELECT retry_policy
 - Transaction requirement: not required.
 - Errors: invalid JSON payload in storage, connection failure.
 - Go reference: `PgQueue.GetRetryPolicy`.
+
+## 9. Queue State Operations
+
+Queue state operations manage the operational status of a queue (`active`, `paused`, 
+or `draining`). These operations interact with the `queue_meta` and `queue_states` 
+tables defined in `schema/000_create_schema.v1.up.sql`.
+
+For queue state semantics, worker behavior, and lifecycle hooks, see 
+[`queue-lifecycle.md`](./queue-lifecycle.md).
+
+### `pause_queue`
+
+```sql
+-- Update queue state
+UPDATE {schema}.queue_meta
+   SET state = 'paused',
+       updated_at = NOW()
+ WHERE queue_name = $1;  -- text
+
+-- Record state change
+INSERT INTO {schema}.queue_states (queue_name, state, reason)
+VALUES ($1, 'paused', $2);  -- text, text|null
+```
+
+- Transaction requirement: required (ensures atomic state change + audit log).
+- Result shape: no rows; caller may inspect affected-row count.
+- Go reference: `PgQueue.Pause`.
+
+### `resume_queue`
+
+```sql
+-- Update queue state
+UPDATE {schema}.queue_meta
+   SET state = 'active',
+       updated_at = NOW()
+ WHERE queue_name = $1;  -- text
+
+-- Record state change
+INSERT INTO {schema}.queue_states (queue_name, state, reason)
+VALUES ($1, 'active', $2);  -- text, text|null
+```
+
+- Transaction requirement: required.
+- Go reference: `PgQueue.Resume`.
+
+### `is_paused`
+
+```sql
+SELECT state
+  FROM {schema}.queue_meta
+ WHERE queue_name = $1  -- text
+ LIMIT 1;
+```
+
+- Result shape: one TEXT value (`active`, `paused`, or `draining`) or no rows.
+- Transaction requirement: not required.
+- Go reference: `PgQueue.IsPaused` (returns boolean).
+
+### `drain_queue`
+
+```sql
+-- Delete all entries
+UPDATE {schema}.{queue}
+   SET deleted_at = NOW(),
+       updated_at = NOW()
+ WHERE deleted_at IS NULL;
+
+-- Pause the queue
+UPDATE {schema}.queue_meta
+   SET state = 'draining',
+       updated_at = NOW()
+ WHERE queue_name = $1;  -- text
+
+-- Record state change
+INSERT INTO {schema}.queue_states (queue_name, state, reason)
+VALUES ($1, 'draining', $2);  -- text, text|null
+```
+
+- Transaction requirement: required (ensures atomic soft-delete + state change).
+- Result shape: no rows.
+- Go reference: `PgQueue.Drain`.
+
+### Queue State Schema
+
+The `queue_meta` table tracks queue-level configuration and operational state:
+
+```sql
+CREATE TABLE {schema}.queue_meta (
+    queue_name TEXT PRIMARY KEY,
+    retry_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
+    state TEXT NOT NULL DEFAULT 'active' 
+        CHECK (state IN ('active', 'paused', 'draining')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+The `queue_states` table provides an audit log of state transitions:
+
+```sql
+CREATE TABLE {schema}.queue_states (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    queue_name TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('active', 'paused', 'draining')),
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    reason TEXT
+);
+```
 
 ## Error-Handling Contract
 
