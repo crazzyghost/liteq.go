@@ -25,6 +25,7 @@ func TestSchemaManager_RenderMigration_QualifiedQueue(t *testing.T) {
 	}
 	for _, want := range []string{
 		"CREATE TABLE IF NOT EXISTS liteq.queue_tasks",
+		"id UUID PRIMARY KEY DEFAULT uuid_generate_v4()",
 		"data JSONB",
 		"status TEXT NOT NULL DEFAULT 'PENDING'",
 		"is_retry BOOLEAN NOT NULL DEFAULT false",
@@ -55,6 +56,7 @@ func TestSchemaManager_RenderMigration_FoundationTables(t *testing.T) {
 		t.Fatal("renderMigration unexpectedly skipped foundation migration")
 	}
 	for _, want := range []string{
+		"CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";",
 		"CREATE TABLE IF NOT EXISTS liteq.queue_meta",
 		"CREATE TABLE IF NOT EXISTS liteq.queue_states",
 		"CREATE TABLE IF NOT EXISTS liteq.migrations",
@@ -215,6 +217,7 @@ func TestSchemaManager_MigrateDryRun_WritesSQLWithoutPool(t *testing.T) {
 	dryRun := output.String()
 	for _, want := range []string{
 		"-- Migration: 000_create_schema.v1.up.sql",
+		"CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";",
 		"CREATE SCHEMA IF NOT EXISTS liteq;",
 		"CREATE TABLE IF NOT EXISTS liteq.migrations",
 		"CREATE TABLE IF NOT EXISTS liteq.schema_versions",
@@ -224,6 +227,7 @@ func TestSchemaManager_MigrateDryRun_WritesSQLWithoutPool(t *testing.T) {
 		"CREATE INDEX IF NOT EXISTS idx_queue_states_queue",
 		"-- Migration: 001_create_queue_table.v1.up.sql",
 		"CREATE TABLE IF NOT EXISTS liteq.queue_tasks",
+		"id UUID PRIMARY KEY DEFAULT uuid_generate_v4()",
 		"CREATE TABLE IF NOT EXISTS liteq.queue_tasks_dead_letter",
 		"CREATE INDEX IF NOT EXISTS idx_queue_tasks_dequeue",
 		"WITH inserted_queue_meta AS (",

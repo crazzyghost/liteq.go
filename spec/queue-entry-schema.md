@@ -6,7 +6,7 @@ native columns.
 
 ## Versioning
 
-- Protocol artifact: `liteq.queue-entry.v1`
+- Protocol artifact: `liteq.queue-entry.v2`
 - Schema source of truth: `schema/001_create_queue_table.v1.up.sql`
 - Release binding: the containing liteq release tag is the authoritative version
   for this document and its companion SQL contracts
@@ -40,8 +40,8 @@ clients, ORM models, and migration tooling operate on the persisted schema.
   "properties": {
     "id": {
       "type": "string",
-      "minLength": 1,
-      "description": "Primary-key identifier for the queue entry."
+      "format": "uuid",
+      "description": "UUID primary-key identifier for the queue entry."
     },
     "data": {
       "type": "object",
@@ -151,7 +151,7 @@ The following entry satisfies the schema above.
 
 ```json
 {
-  "id": "task_123",
+  "id": "550e8400-e29b-41d4-a716-446655440000",
   "data": {
     "job": "send-email",
     "recipient": "user@example.com"
@@ -180,7 +180,7 @@ The following entry satisfies the schema above.
 
 | Field | Postgres type | Default | Nullable | Description |
 | --- | --- | --- | --- | --- |
-| `id` | `TEXT` | none | No | Primary key for the entry. |
+| `id` | `UUID` | `uuid_generate_v4()` | No | Primary key for the entry. Applications may omit it on enqueue to accept the database-generated UUID. |
 | `data` | `JSONB` | `'{}'::jsonb` | No | Application payload. |
 | `status` | `TEXT` | `'PENDING'` | No | Current lifecycle state. |
 | `is_retry` | `BOOLEAN` | `false` | No | Indicates whether the row is a retry attempt. |
@@ -236,6 +236,7 @@ For queue-level lifecycle hooks and state management, see [`queue-lifecycle.md`]
 ## Go Compatibility Notes
 
 - `Task` is the primary and canonical Go row model for queue APIs.
+- `Task.ID` uses a UUID string in Go. Leave it empty on enqueue to let PostgreSQL assign `uuid_generate_v4()`.
 - SQL column names remain the protocol source of truth.
 - Go JSON tags use camelCase for business fields (`isRetry`, `retryPolicy`, `nextRunAt`, 
   `lastRunAt`, `processedAt`) and snake_case for audit timestamps (`enqueued_at`, 

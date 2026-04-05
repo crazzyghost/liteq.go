@@ -17,7 +17,7 @@ driver.
 - The canonical row shape returned by read operations is:
 
 ```text
-id TEXT
+id UUID
 data JSONB
 status TEXT
 is_retry BOOLEAN
@@ -54,7 +54,6 @@ deleted_at TIMESTAMPTZ
 
 ```sql
 INSERT INTO {schema}.{queue} (
-    id,
     data,
     status,
     is_retry,
@@ -66,22 +65,22 @@ INSERT INTO {schema}.{queue} (
     enqueued_at,
     updated_at
 ) VALUES (
-    $1,  -- text
-    $2,  -- jsonb
-    $3,  -- text
-    $4,  -- boolean
-    $5,  -- integer
-    $6,  -- jsonb|null
+    $1,  -- jsonb
+    $2,  -- text
+    $3,  -- boolean
+    $4,  -- integer
+    $5,  -- jsonb|null
+    $6,  -- timestamptz|null
     $7,  -- timestamptz|null
     $8,  -- timestamptz|null
-    $9,  -- timestamptz|null
     NOW(),
     NOW()
 );
 ```
 
 - Result shape: no rows; success is the affected-row count.
-- Errors: duplicate primary key, invalid JSONB, transaction/connection failure.
+- Auto-generated ID behaviour: omit `id` to accept the column default `uuid_generate_v4()`. Callers may still provide an explicit UUID.
+- Errors: duplicate primary key, invalid UUID, invalid JSONB, transaction/connection failure.
 - Go reference: `PgQueue.Enqueue`.
 
 ## 2. `enqueue_many`
@@ -93,14 +92,14 @@ so other language clients can implement batch inserts to avoid N round trips.
 
 ```sql
 INSERT INTO {schema}.{queue} (
-    id, data, status, is_retry, retries, retry_policy,
+    data, status, is_retry, retries, retry_policy,
     next_run_at, last_run_at, processed_at, enqueued_at, updated_at
 ) VALUES
-    ($1,  $2,  $3,  $4,  $5,  $6,  $7,  $8,  $9,  NOW(), NOW()),
-    ($10, $11, $12, $13, $14, $15, $16, $17, $18, NOW(), NOW());
+    ($1,  $2,  $3,  $4,  $5,  $6,  $7,  $8,  NOW(), NOW()),
+    ($9, $10, $11, $12, $13, $14, $15, $16, NOW(), NOW());
 ```
 
-- Parameter types repeat the `enqueue` tuple shape per row.
+- Parameter types repeat the `enqueue` tuple shape per row. Rows may omit `id` to use the UUID default, or callers may provide explicit UUIDs with the single-row form.
 - Transaction requirement: all rows must succeed or the batch rolls back.
 - Errors: same as `enqueue`, plus partial-batch failure if any row violates a
   constraint.
@@ -154,7 +153,7 @@ RETURNING {schema}.{queue}.id,
 UPDATE {schema}.{queue}
    SET status = $1,      -- text
        updated_at = NOW()
- WHERE id = $2;          -- text
+ WHERE id = $2;          -- uuid
 ```
 
 - Additional predicates may be appended for guarded updates.
@@ -176,7 +175,7 @@ UPDATE {schema}.{queue}
        last_run_at = $6,     -- timestamptz|null
        processed_at = $7,    -- timestamptz|null
        updated_at = NOW()
- WHERE id = $8;              -- text
+ WHERE id = $8;              -- uuid
 ```
 
 - Additional conditions may be appended to the `WHERE` clause.

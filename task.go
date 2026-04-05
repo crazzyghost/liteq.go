@@ -16,6 +16,8 @@ const (
 )
 
 // Task is a queue entry representing a unit of work to be processed.
+// ID stores the canonical UUID string for the queue row. Leave it empty on
+// enqueue to let PostgreSQL generate a new UUID.
 type Task struct {
 	ID          string       `json:"id" db:"id"`
 	Data        QueueData    `json:"data" db:"data"`

@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS {{qualified_queue_name}} (
-    id TEXT PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     data JSONB NOT NULL DEFAULT '{}'::jsonb,
     status TEXT NOT NULL DEFAULT 'PENDING',
     is_retry BOOLEAN NOT NULL DEFAULT false,

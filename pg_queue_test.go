@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var uuidStringPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // ---- ParseRetryStrategy ----
 
@@ -252,9 +255,10 @@ func TestTaskStatusValues(t *testing.T) {
 // ---- Flat Task ----
 
 func TestTask_UsesFlattenedFields(t *testing.T) {
-	task := newTestTask("id-1")
-	if task.ID != "id-1" {
-		t.Errorf("Task.ID = %q, want %q", task.ID, "id-1")
+	const wantID = "550e8400-e29b-41d4-a716-446655440000"
+	task := newTestTask(wantID)
+	if task.ID != wantID {
+		t.Errorf("Task.ID = %q, want %q", task.ID, wantID)
 	}
 }
 
@@ -339,7 +343,7 @@ func enqueueIntegrationTestTasks(t *testing.T, q *PgQueue, count int) {
 	defer rollback(tx)
 
 	for i := range count {
-		task := newTestTask(fmt.Sprintf("task-%d", i))
+		task := newTestTask("")
 		if err := q.Enqueue(task, tx); err != nil {
 			t.Fatalf("Enqueue(%d): %v", i, err)
 		}
@@ -386,6 +390,52 @@ func TestPgQueue_Enqueue_RejectsWhenDraining(t *testing.T) {
 	err := q.Enqueue(newTestTask("draining-enqueue"), nil)
 	if !errors.Is(err, ErrQueueDraining) {
 		t.Fatalf("Enqueue error = %v, want ErrQueueDraining", err)
+	}
+}
+
+func TestPgQueue_Enqueue_GeneratesUUIDWhenIDEmpty(t *testing.T) {
+	q, pool := newIntegrationTestQueue(t)
+
+	tx, txCtx, cancel, err := q.BeginTx(context.Background())
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	defer cancel()
+	defer rollback(tx)
+
+	task := newTestTask("")
+	if err := q.Enqueue(task, tx); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := tx.Commit(txCtx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	var storedID string
+	var storedIDType string
+	err = pool.QueryRow(
+		context.Background(),
+		fmt.Sprintf("SELECT id::text, pg_typeof(id)::text FROM %s LIMIT 1", q.queueTable()),
+	).Scan(&storedID, &storedIDType)
+	if err != nil {
+		t.Fatalf("query stored row: %v", err)
+	}
+	if storedIDType != "uuid" {
+		t.Fatalf("stored id type = %q, want uuid", storedIDType)
+	}
+	if !uuidStringPattern.MatchString(storedID) {
+		t.Fatalf("stored id = %q, want UUID string", storedID)
+	}
+
+	tasks, err := q.Dequeue(1)
+	if err != nil {
+		t.Fatalf("Dequeue: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("dequeue len = %d, want 1", len(tasks))
+	}
+	if tasks[0].ID != storedID {
+		t.Fatalf("dequeued id = %q, want %q", tasks[0].ID, storedID)
 	}
 }
 

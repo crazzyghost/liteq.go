@@ -207,34 +207,38 @@ func (q *PgQueue) Enqueue(task Task, tx pgx.Tx) error { //nolint:gocritic // Pha
 		return fmt.Errorf("enqueue %s: %w", q.QueueName, ErrQueueDraining)
 	}
 
+	columns := []string{
+		"data",
+		"status",
+		"is_retry",
+		"retries",
+		"retry_policy",
+		"next_run_at",
+		"last_run_at",
+		"processed_at",
+		"enqueued_at",
+		"updated_at",
+	}
+	values := []any{
+		task.Data,
+		task.Status,
+		task.IsRetry,
+		task.Retries,
+		task.RetryPolicy,
+		task.NextRunAt,
+		task.LastRunAt,
+		task.ProcessedAt,
+		psql.Raw("NOW()"),
+		psql.Raw("NOW()"),
+	}
+	if task.ID != "" {
+		columns = append([]string{"id"}, columns...)
+		values = append([]any{task.ID}, values...)
+	}
+
 	query := psql.Insert(
-		im.Into(
-			q.queueTable(),
-			"id",
-			"data",
-			"status",
-			"is_retry",
-			"retries",
-			"retry_policy",
-			"next_run_at",
-			"last_run_at",
-			"processed_at",
-			"enqueued_at",
-			"updated_at",
-		),
-		im.Values(psql.Arg(
-			task.ID,
-			task.Data,
-			task.Status,
-			task.IsRetry,
-			task.Retries,
-			task.RetryPolicy,
-			task.NextRunAt,
-			task.LastRunAt,
-			task.ProcessedAt,
-			psql.Raw("NOW()"),
-			psql.Raw("NOW()"),
-		)),
+		im.Into(q.queueTable(), columns...),
+		im.Values(psql.Arg(values...)),
 	)
 
 	sql, args, err := query.Build(q.Ctx)

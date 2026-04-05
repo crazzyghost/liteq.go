@@ -101,7 +101,7 @@ tx, txCtx, cancel, _ := jobs.BeginTx(ctx)
 defer cancel()
 
 jobs.Enqueue(lq.Task{
-    ID: "welcome-001",
+    // ID is optional. PostgreSQL generates a UUID when it is omitted.
     Data: map[string]any{"email": "ada@example.com"},
 }, tx)
 

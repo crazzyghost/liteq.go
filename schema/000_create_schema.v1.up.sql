@@ -1,3 +1,5 @@
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
 CREATE SCHEMA IF NOT EXISTS {{schema_name}};
 
 CREATE TABLE IF NOT EXISTS {{qualified_migrations_name}} (
